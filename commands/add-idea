@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+# add-idea: Create a structured idea file
+# Usage: add-idea <file_name> <body>
+
+set -euo pipefail
+
+if [ $# -lt 2 ]; then
+    echo "Usage: add-idea <file_name> <body>"
+    exit 1
+fi
+
+file_name="$1"
+body="$2"
+
+# Get the directory where this script is located
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Navigate to the repo root (parent of commands/)
+repo_root="$(cd "$script_dir/.." && pwd)"
+ideas_dir="$repo_root/ideas"
+
+# Capture metadata
+timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+issued_from="$PWD"
+
+# Create the idea file
+idea_file="$ideas_dir/${file_name}.md"
+
+if [ -f "$idea_file" ]; then
+    echo "Error: Idea file '$idea_file' already exists"
+    exit 1
+fi
+
+cat > "$idea_file" <<EOF
+# ${file_name//_/ }
+
+**Timestamp:** $timestamp
+**Issued from:** \`$issued_from\`
+
+## Idea
+
+$body
+EOF
+
+echo "Idea saved to: $idea_file"

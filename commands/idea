@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+# idea: Capture an idea using Claude Code to structure it
+# Usage: idea "Free-text description of your idea"
+
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: idea \"Free-text description of your idea\""
+    exit 1
+fi
+
+free_text="$1"
+current_dir="$PWD"
+
+# Get the directory where this script is located
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Create a prompt for Claude Code
+prompt="Parse the following idea into structured JSON format.
+
+Idea text:
+$free_text
+
+Tasks:
+1. Generate a good snake_case filename that captures the essence of the idea (without .md extension)
+2. Correct any typos in the idea text, but keep the content otherwise unchanged
+
+Output ONLY valid JSON in this exact format (no markdown, no explanations):
+{\"file_name\": \"...\", \"body\": \"...\"}
+"
+
+# Call Claude Code and capture the JSON output
+raw_output=$(echo "$prompt" | claude --print --output-format text 2>/dev/null)
+
+# Strip markdown code fences if present
+json_output=$(echo "$raw_output" | sed -n '/^```json$/,/^```$/p' | sed '1d;$d')
+# If no code fences found, use the raw output
+if [ -z "$json_output" ]; then
+    json_output="$raw_output"
+fi
+
+# Debug: show what was captured (comment out in production)
+# echo "DEBUG: Captured output:" >&2
+# echo "$json_output" >&2
+
+# Parse JSON using a simple method (requires jq or python)
+if command -v jq &> /dev/null; then
+    file_name=$(echo "$json_output" | jq -r '.file_name' 2>/dev/null)
+    body=$(echo "$json_output" | jq -r '.body' 2>/dev/null)
+else
+    # Fallback to python if jq not available
+    parsed=$(python3 -c "import json, sys; data=json.loads(sys.stdin.read()); print(data['file_name']); print('|||'); print(data['body'])" <<< "$json_output")
+    file_name=$(echo "$parsed" | sed -n '1p')
+    body=$(echo "$parsed" | sed -n '2,/|||/p' | sed '1d;$d')
+fi
+
+# Call add-idea with the parsed values
+"$script_dir/add-idea" "$file_name" "$body"
