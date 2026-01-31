@@ -48,7 +48,3 @@ These terms are used consistently throughout, though their precise definitions w
     - Commands (deterministic helpers (e.g. MCPs but also just terminal commands))
     - Agents (non-deterministic helpers)
   - Permissions (to perform specific actions without asking; access to specific repos)
-
-## First Implementation Goal
-
-Create a tool that lists all Claude conversations since the last review session.

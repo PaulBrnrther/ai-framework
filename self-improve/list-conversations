@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+# list-conversations: List Claude conversations since a given date
+# Usage: list-conversations [date]
+#   date: optional, e.g. "2026-01-27" or "3 days ago" (default: today)
+
+set -euo pipefail
+
+HISTORY_FILE="$HOME/.claude/history.jsonl"
+
+if [ ! -f "$HISTORY_FILE" ]; then
+    echo "Error: History file not found at $HISTORY_FILE"
+    exit 1
+fi
+
+# Determine the cutoff date
+if [ $# -ge 1 ]; then
+    date_arg="$1"
+else
+    date_arg="today"
+fi
+
+# Use python3 for date parsing, JSON processing, and output formatting
+export LIST_CONV_DATE="$date_arg"
+export LIST_CONV_FILE="$HISTORY_FILE"
+
+python3 << 'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+date_arg = os.environ["LIST_CONV_DATE"]
+history_file = os.environ["LIST_CONV_FILE"]
+
+# Parse the date argument into a cutoff timestamp
+def parse_date(s):
+    """Parse date string into a datetime at midnight."""
+    # Try ISO date format first
+    try:
+        return datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        pass
+
+    # Handle relative dates like "N days ago", "today", "yesterday"
+    s_lower = s.strip().lower()
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if s_lower == "today":
+        return today
+    if s_lower == "yesterday":
+        return today - timedelta(days=1)
+
+    # "N days ago", "N day ago"
+    parts = s_lower.split()
+    if len(parts) == 3 and parts[2] == "ago":
+        try:
+            n = int(parts[0])
+        except ValueError:
+            print(f"Error: Cannot parse date '{s}'", file=sys.stderr)
+            sys.exit(1)
+        unit = parts[1].rstrip("s")  # normalize "days" -> "day"
+        if unit == "day":
+            return today - timedelta(days=n)
+        elif unit == "week":
+            return today - timedelta(weeks=n)
+        elif unit == "hour":
+            return now - timedelta(hours=n)
+
+    print(f"Error: Cannot parse date '{s}'. Use YYYY-MM-DD or e.g. '3 days ago'.", file=sys.stderr)
+    sys.exit(1)
+
+cutoff = parse_date(date_arg)
+cutoff_ms = int(cutoff.timestamp() * 1000)
+
+# Read and filter conversations
+conversations = []
+with open(history_file, "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = entry.get("timestamp", 0)
+        if ts >= cutoff_ms:
+            conversations.append(entry)
+
+if not conversations:
+    print(f"No conversations found since {cutoff.strftime('%Y-%m-%d %H:%M')}.")
+    sys.exit(0)
+
+# Group by project
+by_project = defaultdict(list)
+for c in conversations:
+    project = c.get("project", "(unknown)")
+    by_project[project].append(c)
+
+# Sort projects alphabetically, conversations by timestamp
+print(f"Conversations since {cutoff.strftime('%Y-%m-%d %H:%M')} ({len(conversations)} total):\n")
+
+for project in sorted(by_project.keys()):
+    entries = sorted(by_project[project], key=lambda e: e["timestamp"])
+    print(f"## {project} ({len(entries)})")
+    for e in entries:
+        ts = datetime.fromtimestamp(e["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M")
+        display = e.get("display", "")
+        # Truncate long prompts
+        if len(display) > 120:
+            display = display[:117] + "..."
+        print(f"  {ts}  {display}")
+    print()
+PYEOF
