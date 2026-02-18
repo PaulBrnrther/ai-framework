@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket pull — git fetch && git reset --hard @{u} in all repos of the active ticket.
+# Warns about uncommitted changes and unpushed commits before proceeding.
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# Collect all branch/repo/worktree triples
+BRANCHES=($(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/://;s/^[[:space:]]*//'))
+
+WORKTREES=()    # worktree paths
+REPO_LABELS=()  # "repo (branch)" labels
+WARNINGS=()
+
+for branch in "${BRANCHES[@]}"; do
+  while IFS= read -r repo; do
+    wt="$REPOS_DIR/$repo.git/branches/$branch"
+    if [ ! -d "$wt" ]; then
+      continue
+    fi
+    WORKTREES+=("$wt")
+    REPO_LABELS+=("$repo ($branch)")
+
+    # Check for uncommitted changes
+    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+      WARNINGS+=("  $repo: uncommitted changes")
+    fi
+
+    # Check for unpushed commits
+    unpushed=$(git -C "$wt" log "@{u}..HEAD" --oneline 2>/dev/null || true)
+    if [ -n "$unpushed" ]; then
+      count=$(echo "$unpushed" | wc -l | tr -d ' ')
+      WARNINGS+=("  $repo: $count unpushed commit(s)")
+    fi
+  done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")
+done
+
+if [ ${#WORKTREES[@]} -eq 0 ]; then
+  echo "No worktrees found for $ACTIVE_TICKET." >&2
+  exit 1
+fi
+
+echo "Will pull (fetch + reset --hard) ${#WORKTREES[@]} repo(s) for $ACTIVE_TICKET:" >&2
+for label in "${REPO_LABELS[@]}"; do
+  echo "  $label" >&2
+done
+
+if [ ${#WARNINGS[@]} -gt 0 ]; then
+  echo "" >&2
+  echo "WARNING — the following issues were found:" >&2
+  for w in "${WARNINGS[@]}"; do
+    echo "$w" >&2
+  done
+  echo "" >&2
+  echo "These will be LOST on reset --hard. Press enter to continue, ctrl-c to abort." >&2
+  read -r </dev/tty
+fi
+
+# Pull all repos
+for i in "${!WORKTREES[@]}"; do
+  wt="${WORKTREES[$i]}"
+  label="${REPO_LABELS[$i]}"
+  echo "Pulling $label..." >&2
+  git -C "$wt" fetch >&2 2>&1 || { echo "  fetch failed for $label" >&2; continue; }
+  git -C "$wt" reset --hard "@{u}" >&2 2>&1 || { echo "  reset failed for $label" >&2; continue; }
+  echo "  done" >&2
+done
+
+echo "All repos pulled." >&2

@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# find-jira-tickets — query Jira for tickets assigned to the current user
+#
+# Output: machine-parseable lines of  TICKET-KEY\tstatus\tsummary
+# (one per line, sorted by status priority, for fzf consumption)
+#
+# Requires: KNIME_ATLASSIAN_EMAIL + KNIME_ATLASSIAN_API_TOKEN env vars
+
+JIRA_BASE="https://knime-com.atlassian.net"
+
+if [ -z "${KNIME_ATLASSIAN_EMAIL:-}" ] || [ -z "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
+  echo "Error: KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN must be set" >&2
+  exit 1
+fi
+
+echo "Fetching assigned tickets from Jira..." >&2
+
+JQL='assignee = currentUser() AND status NOT IN (Done, Closed) ORDER BY updated DESC'
+ENCODED_JQL=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")
+
+RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+  -H "Accept: application/json" \
+  "${JIRA_BASE}/rest/api/3/search/jql?jql=${ENCODED_JQL}&fields=summary,status,issuetype&maxResults=50")
+
+# Check for errors
+if echo "$RESPONSE" | jq -e '.errorMessages' >/dev/null 2>&1; then
+  echo "Jira API error:" >&2
+  echo "$RESPONSE" | jq -r '.errorMessages[]' >&2
+  exit 1
+fi
+
+COUNT=$(echo "$RESPONSE" | jq '.issues | length')
+echo "Found $COUNT ticket(s)." >&2
+
+# Sort by status priority and output: KEY\tstatus\tsummary
+# Priority order (lower = shown first):
+#   Awaiting merge, In Progress, In Backlog, New, On Hold, (anything else)
+echo "$RESPONSE" | jq -r '
+  def status_order:
+    {"Resolved": 1, "Awaiting merge": 2, "In Progress": 3, "In Backlog": 4, "New": 5, "On Hold": 6};
+  [.issues[] | {
+    key: .key,
+    status: .fields.status.name,
+    summary: .fields.summary,
+    issuetype: .fields.issuetype.name,
+    order: (status_order[.fields.status.name] // 0)
+  }] | sort_by(.order) | .[] |
+  "\(.key)\t\(.status)\t\(.summary)\t\(.issuetype)"
+'

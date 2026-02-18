@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket init — create a new ticket context from a branch name
+#
+# Usage: eval "$(ticket enh/UIEXT-1234-fix-the-koala-bug)"
+# (wrapped by a shell function that evals the output)
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+
+if [ $# -eq 0 ]; then
+  echo "Usage: ticket <branch-name>" >&2
+  echo "  Example: ticket enh/UIEXT-1234-fix-the-koala-bug" >&2
+  exit 1
+fi
+
+BRANCH="$1"
+
+# Parse branch name: [<type>/]<TICKET-KEY>-<slug>
+# With type prefix: enh/UIEXT-1234-fix-the-koala-bug
+# Without type prefix: UIEXT-1234-fix-the-koala-bug
+if [[ "$BRANCH" =~ ^([a-z]+)/([A-Z]+-[0-9]+)-(.+)$ ]]; then
+  TYPE="${BASH_REMATCH[1]}"
+  TICKET="${BASH_REMATCH[2]}"
+  SLUG="${BASH_REMATCH[3]}"
+elif [[ "$BRANCH" =~ ^([A-Z]+-[0-9]+)-(.+)$ ]]; then
+  TYPE=""
+  TICKET="${BASH_REMATCH[1]}"
+  SLUG="${BASH_REMATCH[2]}"
+else
+  echo "Error: Branch name must match pattern [<type>/]<TICKET>-<slug>" >&2
+  echo "  Examples: enh/UIEXT-1234-fix-the-koala-bug" >&2
+  echo "            UIEXT-1234-fix-the-koala-bug" >&2
+  exit 1
+fi
+
+# Derive human-readable name from slug: replace hyphens with spaces, title case
+NAME=$(echo "$SLUG" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+
+# Show summary and ask for confirmation
+echo "Branch: $BRANCH" >&2
+echo "Ticket: $TICKET" >&2
+if [ -n "$TYPE" ]; then
+  echo "Type:   $TYPE" >&2
+fi
+echo "Name:   $NAME" >&2
+
+# Create ticket YAML
+mkdir -p "$TICKETS_DIR"
+YAML_FILE=$(ticket_yaml_file "$TICKET")
+if [ -f "$YAML_FILE" ]; then
+  echo "Ticket $TICKET already exists. Use 'ticket add-repo' or edit the YAML directly." >&2
+  echo "export ACTIVE_TICKET=$TICKET"
+  exit 0
+fi
+
+cat > "$YAML_FILE" <<EOF
+ticket: $TICKET
+name: "$NAME"
+branches:
+  $BRANCH:
+    repos: {}
+EOF
+
+# Set system-wide active ticket
+set_active_ticket "$TICKET" --global
+
+# Create tc base directory (claude workspace for this ticket)
+TICKET_DIR=$(ticket_dir "$BRANCH")
+
+echo "Ticket $TICKET created and focused." >&2
+
+# Output commands for the shell function to eval
+echo "export ACTIVE_TICKET=$TICKET"
+echo "cd '$TICKET_DIR'"

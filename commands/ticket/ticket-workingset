@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""Create/update an Eclipse working set and symlinks for the active ticket."""
+import os
+import sys
+import subprocess
+import re
+import time
+import struct
+
+TICKETS_DIR = os.path.expanduser("~/.tickets")
+REPOS_DIR = os.path.expanduser("~/knime/repos")
+ECLIPSE_PLUGINS = os.path.expanduser(
+    "~/programs/aarch64-workspace-v4/.metadata/.plugins"
+)
+WORKINGSETS_XML = os.path.join(
+    ECLIPSE_PLUGINS, "org.eclipse.ui.workbench/workingsets.xml"
+)
+WORKBENCH_XMI = os.path.join(
+    ECLIPSE_PLUGINS, "org.eclipse.e4.workbench/workbench.xmi"
+)
+ECLIPSE_PROJECTS_DIR = os.path.join(
+    ECLIPSE_PLUGINS, "org.eclipse.core.resources/.projects"
+)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- Check active ticket (read from ~/.active-ticket, not env) ---
+active_ticket_file = os.path.expanduser("~/.active-ticket")
+if not os.path.isfile(active_ticket_file):
+    print("No active ticket (~/.active-ticket not found).", file=sys.stderr)
+    sys.exit(1)
+with open(active_ticket_file) as f:
+    active_ticket = f.read().strip()
+if not active_ticket:
+    print("No active ticket (~/.active-ticket is empty).", file=sys.stderr)
+    sys.exit(1)
+
+yaml_file = os.path.join(TICKETS_DIR, f"{active_ticket}.yaml")
+if not os.path.isfile(yaml_file):
+    print(f"Ticket YAML not found: {yaml_file}", file=sys.stderr)
+    sys.exit(1)
+
+# --- Check if Eclipse is running and shut it down gracefully ---
+ECLIPSE_APP = os.path.expanduser("~/eclipse/rcp-2024-12/Eclipse.app")
+
+def is_eclipse_running():
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"{ECLIPSE_APP}/Contents/MacOS/eclipse"],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def shutdown_eclipse():
+    """Gracefully quit Eclipse using AppleScript."""
+    print("Eclipse is running. Shutting down gracefully...", file=sys.stderr)
+    # Use the full path to target the specific Eclipse instance
+    applescript = f'tell application "{ECLIPSE_APP}" to quit'
+    subprocess.run(["osascript", "-e", applescript], capture_output=True)
+
+    # Wait for Eclipse to fully shut down (up to 60 seconds)
+    import time as time_module
+    for i in range(60):
+        if not is_eclipse_running():
+            print("Eclipse has shut down.", file=sys.stderr)
+            return True
+        time_module.sleep(1)
+        if i % 10 == 9:
+            print(f"  Still waiting for Eclipse to shut down... ({i+1}s)", file=sys.stderr)
+
+    print("WARNING: Eclipse did not shut down in time. Proceeding anyway.", file=sys.stderr)
+    return False
+
+def start_eclipse(import_paths=None):
+    """Start Eclipse, optionally with -importProject args."""
+    print("Starting Eclipse...", file=sys.stderr)
+    cmd = ["open", ECLIPSE_APP]
+    if import_paths:
+        cmd.append("--args")
+        for path in import_paths:
+            cmd.extend(["-importProject", path])
+        print(f"  Importing {len(import_paths)} project(s)...", file=sys.stderr)
+    subprocess.Popen(cmd, start_new_session=True)
+    print("Eclipse started.", file=sys.stderr)
+
+eclipse_was_running = is_eclipse_running()
+if eclipse_was_running:
+    shutdown_eclipse()
+
+# --- Parse ticket YAML for repos and plugins ---
+with open(yaml_file) as f:
+    lines = f.readlines()
+
+# Find branches
+branches = []
+for line in lines:
+    stripped = line.rstrip()
+    # Branch lines are indented by 2 spaces and contain a /
+    if re.match(r"^  ([a-z]+/)?[A-Z]+-[0-9]+-", stripped):
+        branches.append(stripped.strip().rstrip(":"))
+
+plugins = set()
+plugin_repos = {}  # {plugin_name: (repo, branch)}
+repos_by_branch = {}  # {branch: [repo1, repo2, ...]}
+
+for branch in branches:
+    in_branch = False
+    current_repo = None
+    in_plugins = False
+    repos_by_branch[branch] = []
+
+    for line in lines:
+        stripped = line.rstrip()
+        if stripped == f"  {branch}:":
+            in_branch = True
+            continue
+        if not in_branch:
+            continue
+        # Next branch starts
+        if (
+            len(stripped) > 2
+            and stripped[0:2] == "  "
+            and stripped[2] != " "
+            and "/" in stripped
+        ):
+            break
+        # Repo line (6 spaces indent, ends with :)
+        if re.match(r"^      \S", stripped) and stripped.endswith(":") and "plugins" not in stripped and "frontend" not in stripped:
+            current_repo = stripped.strip().rstrip(":")
+            repos_by_branch[branch].append(current_repo)
+            in_plugins = False
+            continue
+        # plugins: key
+        if stripped.strip() == "plugins:":
+            in_plugins = True
+            continue
+        if stripped.strip().startswith("plugins:"):
+            # plugins: [] or plugins: [...]
+            in_plugins = False
+            continue
+        # frontend: key ends plugin section
+        if stripped.strip().startswith("frontend"):
+            in_plugins = False
+            continue
+        # Plugin list item (handle both string and object format)
+        if in_plugins and stripped.strip().startswith("- "):
+            rest = stripped.strip()[2:]  # after "- "
+            if rest.startswith("name:"):
+                plugin = rest.split("name:")[1].strip()
+            elif ":" not in rest:
+                plugin = rest.split("#")[0].strip()
+            else:
+                continue
+            if plugin:
+                plugins.add(plugin)
+                plugin_repos[plugin] = (current_repo, branch)
+            continue
+        # Any non-indented line under plugins ends the list
+        if in_plugins and not stripped.startswith("          "):
+            in_plugins = False
+
+if not plugins:
+    print(f"No plugins found for ticket {active_ticket}.", file=sys.stderr)
+    sys.exit(1)
+
+sorted_plugins = sorted(plugins)
+print(f"Plugins for {active_ticket}: {', '.join(sorted_plugins)}", file=sys.stderr)
+
+# --- Read and update workingsets.xml ---
+if not os.path.isfile(WORKINGSETS_XML):
+    print(f"workingsets.xml not found: {WORKINGSETS_XML}", file=sys.stderr)
+    sys.exit(1)
+
+with open(WORKINGSETS_XML) as f:
+    xml_content = f.read()
+
+# Build the items XML
+items_xml = "\n".join(
+    f'<item factoryID="org.eclipse.ui.internal.model.ResourceFactory" '
+    f'path="/{p}" type="4"/>'
+    for p in sorted_plugins
+)
+
+ws_label = active_ticket
+ws_name = active_ticket
+
+# Check if working set already exists
+existing_pattern = re.compile(
+    r'<workingSet\b[^>]*\bname="' + re.escape(ws_name) + r'"[^>]*/>'
+    r'|'
+    r'<workingSet\b[^>]*\bname="' + re.escape(ws_name) + r'"[^>]*>.*?</workingSet>',
+    re.DOTALL,
+)
+
+match = existing_pattern.search(xml_content)
+if match:
+    # Extract existing id
+    id_match = re.search(r'id="([^"]*)"', match.group(0))
+    existing_id = id_match.group(1) if id_match else f"{int(time.time() * 1000)}_0"
+    new_ws = (
+        f'<workingSet editPageId="org.eclipse.ui.resourceWorkingSetPage" '
+        f'factoryID="org.eclipse.ui.internal.WorkingSetFactory" '
+        f'id="{existing_id}" label="{ws_label}" name="{ws_name}">\n'
+        f'{items_xml}\n'
+        f'</workingSet>'
+    )
+    xml_content = xml_content[:match.start()] + new_ws + xml_content[match.end():]
+    print(f"Updated existing working set '{ws_name}'.", file=sys.stderr)
+else:
+    # Insert new working set before </workingSetManager>
+    ws_id = f"{int(time.time() * 1000)}_0"
+    new_ws = (
+        f'<workingSet editPageId="org.eclipse.ui.resourceWorkingSetPage" '
+        f'factoryID="org.eclipse.ui.internal.WorkingSetFactory" '
+        f'id="{ws_id}" label="{ws_label}" name="{ws_name}">\n'
+        f'{items_xml}\n'
+        f'</workingSet>\n'
+    )
+    # Insert before <mruList if present, otherwise before </workingSetManager>
+    if "<mruList" in xml_content:
+        xml_content = xml_content.replace("<mruList", new_ws + "<mruList", 1)
+    else:
+        xml_content = xml_content.replace("</workingSetManager>", new_ws + "</workingSetManager>")
+    print(f"Created new working set '{ws_name}'.", file=sys.stderr)
+
+with open(WORKINGSETS_XML, "w") as f:
+    f.write(xml_content)
+
+print(f"Updated {WORKINGSETS_XML}", file=sys.stderr)
+
+# Symlinks are now managed by update-symlinks (called on every global ticket switch).
+# ticket-workingset no longer needs to handle them.
+
+# --- Detect plugins not yet imported into Eclipse ---
+missing_plugins = []
+for plugin in sorted_plugins:
+    location_file = os.path.join(ECLIPSE_PROJECTS_DIR, plugin, ".location")
+    if not os.path.exists(location_file):
+        repo, branch = plugin_repos[plugin]
+        plugin_path = os.path.join(REPOS_DIR, repo, plugin)
+        missing_plugins.append(plugin_path)
+        print(f"  Will import: {plugin} (not yet in Eclipse)", file=sys.stderr)
+
+# --- Fix .location URIs to use symlink paths instead of bare repo paths ---
+#
+# Eclipse stores each imported project's location in a binary .location file:
+#   <ECLIPSE_PROJECTS_DIR>/<plugin-name>/.location
+#
+# Binary format (all fixed-size except URI):
+#   [16 bytes] header
+#   [2 bytes]  URI length (big-endian uint16)
+#   [N bytes]  URI string, e.g. "URI//file:/Users/.../repos/knime-core/org.knime.core"
+#   [14 bytes] null padding
+#   [16 bytes] trailer
+#
+# Problem: When Eclipse imports a project via -importProject, it resolves
+# symlinks and stores the real path. For bare-repo worktrees this becomes:
+#   .../repos/knime-core.git/branches/enh/UIEXT-1234-.../org.knime.core
+# which is branch-specific and breaks when switching tickets.
+#
+# Fix: Rewrite the URI to use the symlink path instead:
+#   .../repos/knime-core/org.knime.core
+# This way the path stays valid across ticket switches (symlinks get updated).
+#
+LOCATION_HEADER = bytes.fromhex("40b18b8123bc00141a2596e7a393be1e")
+LOCATION_TRAILER = bytes.fromhex("c058fbf323bc00141a51f38c7bbb77c6")
+
+for plugin in sorted_plugins:
+    location_file = os.path.join(ECLIPSE_PROJECTS_DIR, plugin, ".location")
+    if not os.path.isfile(location_file):
+        continue
+    with open(location_file, "rb") as f:
+        data = f.read()
+    # Parse: 16-byte header + 2-byte BE length + URI + 14 null bytes + 16-byte trailer
+    if len(data) < 34 or data[:16] != LOCATION_HEADER:
+        continue
+    uri_len = struct.unpack(">H", data[16:18])[0]
+    uri = data[18:18 + uri_len].decode("utf-8", errors="replace")
+    # Check if URI goes through a bare repo path (.git/branches/)
+    # e.g. URI//file:/Users/.../repos/knime-core.git/branches/enh/UIEXT-1234-.../org.knime.core
+    match = re.search(r"(URI//file:.*/repos/)([^/]+)\.git/branches/.+/([^/]+)$", uri)
+    if not match:
+        continue
+    repo = match.group(2)
+    plugin_name = match.group(3)
+    new_uri = f"{match.group(1)}{repo}/{plugin_name}"
+    if new_uri == uri:
+        continue
+    new_uri_bytes = new_uri.encode("utf-8")
+    new_data = LOCATION_HEADER + struct.pack(">H", len(new_uri_bytes)) + new_uri_bytes + (b"\x00" * 14) + LOCATION_TRAILER
+    with open(location_file, "wb") as f:
+        f.write(new_data)
+    print(f"  {plugin}: fixed .location URI to use symlink path", file=sys.stderr)
+
+# --- Set active working set in Project Explorer ---
+if os.path.isfile(WORKBENCH_XMI):
+    with open(WORKBENCH_XMI) as f:
+        xmi_content = f.read()
+    new_xmi = re.sub(
+        r'currentWorkingSetName=&quot;[^"]*?&quot;',
+        f'currentWorkingSetName=&quot;{active_ticket}&quot;',
+        xmi_content,
+    )
+    if new_xmi != xmi_content:
+        with open(WORKBENCH_XMI, "w") as f:
+            f.write(new_xmi)
+        print(f"Set active working set to '{active_ticket}' in workbench.xmi", file=sys.stderr)
+
+# --- Restart Eclipse if it was running or there are projects to import ---
+if eclipse_was_running or missing_plugins:
+    start_eclipse(import_paths=missing_plugins if missing_plugins else None)

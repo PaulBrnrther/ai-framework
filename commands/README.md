@@ -10,6 +10,9 @@ Capture ideas using free-text input. Claude Code structures the input into a for
 ### `add-idea`
 Low-level command to create structured idea files with specific arguments.
 
+### `ticket/`
+Ticket context switching system — see [ticket/ticket-shell-function.zsh](ticket/ticket-shell-function.zsh) for the shell integration and `CLAUDE.md` for full documentation.
+
 ## Installation
 
 See [ideas/meta-add-ideas-framework/SETUP.md](../ideas/meta-add-ideas-framework/SETUP.md) for installation instructions.

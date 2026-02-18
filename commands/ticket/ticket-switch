@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket switch — pick a different ticket to work on (in this terminal)
+# Writes eval commands to a temp file (path passed as $TICKET_EVAL_FILE)
+# because stdout is needed for fzf's UI.
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+EVAL_FILE="${TICKET_EVAL_FILE:-}"
+require_eval_file
+
+# Collect all active tickets, ordered by recent usage
+RECENT_FILE="$TICKETS_DIR/.recent"
+TICKETS=()
+NAMES=()
+
+# Helper: add a ticket to the arrays
+add_ticket() {
+  local yaml="$TICKETS_DIR/$1.yaml"
+  [ -f "$yaml" ] || return
+  local t=$(grep '^ticket:' "$yaml" | sed 's/^ticket: //')
+  local n=$(grep '^name:' "$yaml" | sed 's/^name: //;s/^"//;s/"$//')
+  TICKETS+=("$t")
+  NAMES+=("$n")
+}
+
+# First add tickets in recent order
+SEEN=()
+if [ -f "$RECENT_FILE" ]; then
+  while IFS= read -r ticket; do
+    [ -n "$ticket" ] || continue
+    add_ticket "$ticket"
+    SEEN+=("$ticket")
+  done < "$RECENT_FILE"
+fi
+
+# Then add any remaining tickets not in .recent
+for yaml in "$TICKETS_DIR"/*.yaml; do
+  [ -f "$yaml" ] || continue
+  t=$(grep '^ticket:' "$yaml" | sed 's/^ticket: //')
+  skip=false
+  for s in "${SEEN[@]+"${SEEN[@]}"}"; do
+    if [ "$s" = "$t" ]; then skip=true; break; fi
+  done
+  $skip || add_ticket "$t"
+done
+
+if [ ${#TICKETS[@]} -eq 0 ]; then
+  echo "No active tickets." >&2
+  exit 1
+elif [ ${#TICKETS[@]} -eq 1 ]; then
+  SELECTED="${TICKETS[0]}"
+  echo "Only one ticket: $SELECTED (${NAMES[0]})" >&2
+else
+  OPTIONS=()
+  for i in "${!TICKETS[@]}"; do
+    marker="  "
+    if [ "${TICKETS[$i]}" = "${ACTIVE_TICKET:-}" ]; then
+      marker="* "
+    fi
+    OPTIONS+=("${marker}${TICKETS[$i]}  ${NAMES[$i]}")
+  done
+
+  CHOICE=$(printf '%s\n' "${OPTIONS[@]}" | fzf --prompt="Switch ticket> " --height=~10 --reverse --no-sort)
+  if [ -z "$CHOICE" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+  SELECTED=$(echo "$CHOICE" | sed 's/^[* ]*//' | awk '{print $1}')
+fi
+
+# Find a worktree to cd into: check if we're in a repo that has a worktree for this ticket
+YAML_FILE=$(ticket_yaml_file "$SELECTED")
+BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+CD_TARGET="$HOME/knime/repos"
+
+# Try to detect current repo from pwd
+CURRENT_DIR="$PWD"
+for repo_git in "$REPOS_DIR"/*.git; do
+  [ -d "$repo_git" ] || continue
+  repo_name=$(basename "$repo_git" .git)
+  if [[ "$CURRENT_DIR" == *"$repo_name"* ]]; then
+    worktree="$repo_git/branches/$BRANCH"
+    if [ -d "$worktree" ]; then
+      CD_TARGET="$worktree"
+    fi
+    break
+  fi
+done
+
+set_active_ticket "$SELECTED"
+
+echo "Switched to $SELECTED" >&2
+
+# Write eval commands to temp file
+echo "export ACTIVE_TICKET=$SELECTED" > "$EVAL_FILE"
+if [ "$CD_TARGET" != "$HOME/knime/repos" ]; then
+  # Current repo has a worktree for this ticket
+  echo "cd '$CD_TARGET'" >> "$EVAL_FILE"
+else
+  # No current-repo match — check how many repos the ticket has
+  TICKET_REPOS=()
+  while IFS= read -r repo; do
+    TICKET_REPOS+=("$repo")
+  done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$BRANCH")
+
+  if [ ${#TICKET_REPOS[@]} -eq 0 ]; then
+    # No repos — cd to tc base directory
+    TICKET_DIR=$(ticket_dir "$BRANCH")
+    echo "cd '$TICKET_DIR'" >> "$EVAL_FILE"
+  elif [ ${#TICKET_REPOS[@]} -eq 1 ]; then
+    # One repo — cd directly to its worktree
+    WORKTREE="$REPOS_DIR/${TICKET_REPOS[0]}.git/branches/$BRANCH"
+    if [ -d "$WORKTREE" ]; then
+      echo "cd '$WORKTREE'" >> "$EVAL_FILE"
+    else
+      echo "TICKET_NEEDS_REPO=1" >> "$EVAL_FILE"
+    fi
+  else
+    # Multiple repos — trigger repo picker
+    echo "TICKET_NEEDS_REPO=1" >> "$EVAL_FILE"
+  fi
+fi

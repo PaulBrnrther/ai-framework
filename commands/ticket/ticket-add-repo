@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket add-repo — add a repo to the active ticket, create worktree, cd there
+#
+# Usage: eval "$(ticket-add-repo knime-core-ui)"
+# (wrapped by the ticket shell function)
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+EVAL_FILE="${TICKET_EVAL_FILE:-}"
+RECENT_REPOS_FILE="$TICKETS_DIR/.recent-repos"
+
+if [ $# -eq 0 ]; then
+  # No arg: show fzf picker with all repos in ~/knime/repos (bare or regular)
+  AVAILABLE=()
+  for entry in "$REPOS_DIR"/*/; do
+    name=$(basename "$entry")
+    # Strip .git suffix for bare repos
+    name="${name%.git}"
+    AVAILABLE+=("$name")
+  done
+  # Deduplicate (a repo may exist as both knime-core and knime-core.git)
+  AVAILABLE=($(printf '%s\n' "${AVAILABLE[@]}" | sort -u))
+  if [ ${#AVAILABLE[@]} -eq 0 ]; then
+    echo "No repos found in $REPOS_DIR" >&2
+    exit 1
+  fi
+  # Sort: recent repos first, then the rest alphabetically
+  SORTED=()
+  if [ -f "$RECENT_REPOS_FILE" ]; then
+    while IFS= read -r recent; do
+      for a in "${AVAILABLE[@]}"; do
+        if [ "$a" = "$recent" ]; then
+          SORTED+=("$a")
+          break
+        fi
+      done
+    done < "$RECENT_REPOS_FILE"
+  fi
+  for a in "${AVAILABLE[@]}"; do
+    local_found=false
+    for s in "${SORTED[@]+"${SORTED[@]}"}"; do
+      if [ "$a" = "$s" ]; then
+        local_found=true
+        break
+      fi
+    done
+    $local_found || SORTED+=("$a")
+  done
+  REPO=$(printf '%s\n' "${SORTED[@]}" | fzf --prompt="Add repo> " --height=~20 --reverse)
+  if [ -z "$REPO" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+  # Write to eval file if in fzf mode (called via shell function)
+  if [ -n "$EVAL_FILE" ]; then
+    # Re-invoke ourselves with the selected repo, output goes to eval file
+    TICKET_EVAL_FILE="" "$0" "$REPO" > "$EVAL_FILE"
+    exit $?
+  fi
+else
+  REPO="$1"
+fi
+
+# 1. Read active ticket
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket. Run 'ticket <branch>' first." >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# 2. Get branch name(s) from YAML
+BRANCHES=($(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/://;s/^[[:space:]]*//'))
+
+if [ ${#BRANCHES[@]} -eq 0 ]; then
+  echo "Error: No branches found in $YAML_FILE" >&2
+  exit 1
+elif [ ${#BRANCHES[@]} -eq 1 ]; then
+  BRANCH="${BRANCHES[0]}"
+else
+  BRANCH=$(printf '%s\n' "${BRANCHES[@]}" | fzf --prompt="Branch> " --height=~10 --reverse </dev/tty)
+  if [ -z "$BRANCH" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+fi
+
+# 3. Ensure bare repo and worktree exist
+ensure_bare_repo "$REPO"
+
+# Check if worktree already exists — just cd there
+WORKTREE_CHECK="$REPOS_DIR/$REPO.git/branches/$BRANCH"
+if [ -d "$WORKTREE_CHECK" ]; then
+  echo "Worktree already exists: $WORKTREE_CHECK" >&2
+  echo "cd '$WORKTREE_CHECK'"
+  exit 0
+fi
+
+ensure_worktree "$REPO" "$BRANCH" --create-from-master
+
+# 4. Update YAML — add repo under the branch
+"$TICKET_LIB_DIR/update-ticket-yaml" "$YAML_FILE" "$BRANCH" "$REPO"
+
+echo "Added $REPO to $ACTIVE_TICKET ($BRANCH)" >&2
+echo "Worktree: $WORKTREE_PATH" >&2
+
+# If this is the globally active ticket, update the symlink for the new repo immediately
+GLOBAL_TICKET=$(cat ~/.active-ticket 2>/dev/null || echo "")
+if [ "$ACTIVE_TICKET" = "$GLOBAL_TICKET" ]; then
+  "$TICKET_LIB_DIR/update-symlinks" "$ACTIVE_TICKET" >&2
+fi
+
+# 5. Update recent repos MRU list
+{
+  echo "$REPO"
+  if [ -f "$RECENT_REPOS_FILE" ]; then
+    grep -v "^${REPO}$" "$RECENT_REPOS_FILE" || true
+  fi
+} > "$RECENT_REPOS_FILE.tmp" && mv "$RECENT_REPOS_FILE.tmp" "$RECENT_REPOS_FILE"
+
+# 6. Output commands for shell function to eval
+echo "cd '$WORKTREE_PATH'"

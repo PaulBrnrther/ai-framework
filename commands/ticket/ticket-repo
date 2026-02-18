@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket repo — switch between repos of the active ticket
+# Creates worktree on the fly if it doesn't exist yet.
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+EVAL_FILE="${TICKET_EVAL_FILE:-}"
+require_eval_file
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# Get the active branch (first one if multiple)
+BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+
+if [ -z "$BRANCH" ]; then
+  echo "Error: No branches found in $YAML_FILE" >&2
+  exit 1
+fi
+
+# Collect all repos listed for this branch (regardless of worktree existence)
+REPOS=()
+while IFS= read -r repo; do
+  REPOS+=("$repo")
+done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$BRANCH")
+
+# If at the top level of a repo worktree, exclude it from the picker
+CURRENT_REPO=""
+for repo in "${REPOS[@]+"${REPOS[@]}"}"; do
+  wt="$REPOS_DIR/$repo.git/branches/$BRANCH"
+  if [ "$PWD" = "$wt" ]; then
+    CURRENT_REPO="$repo"
+    break
+  fi
+done
+
+CANDIDATES=()
+for repo in "${REPOS[@]+"${REPOS[@]}"}"; do
+  [ "$repo" != "$CURRENT_REPO" ] && CANDIDATES+=("$repo")
+done
+
+if [ ${#CANDIDATES[@]} -eq 0 ]; then
+  echo "No other repos for $ACTIVE_TICKET." >&2
+  exit 1
+elif [ ${#CANDIDATES[@]} -eq 1 ]; then
+  REPO="${CANDIDATES[0]}"
+else
+  REPO=$(printf '%s\n' "${CANDIDATES[@]}" | fzf --prompt="Repo> " --height=~10 --reverse)
+  if [ -z "$REPO" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+fi
+
+# Ensure worktree exists, create if needed
+ensure_bare_repo "$REPO"
+if ensure_worktree "$REPO" "$BRANCH" --create-from-master; then
+  echo "cd '$WORKTREE_PATH'" > "$EVAL_FILE"
+fi

@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket jira — search GitHub for branches matching a ticket number,
+# create (or update) ticket YAML with all discovered repos, set active ticket.
+#
+# Usage: eval "$(ticket-jira UIEXT-3141)"
+# (wrapped by the ticket shell function)
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+EVAL_FILE="${TICKET_EVAL_FILE:-}"
+
+# Write JIRA.md with description + steps to reproduce
+# Args: $1=target_dir, $2=title (summary to use)
+write_jira_md() {
+  local dir="$1" title="$2"
+  if [ -z "$TICKET_DESCRIPTION" ] && [ -z "$TICKET_STEPS_TO_REPRODUCE" ]; then
+    return
+  fi
+  {
+    echo "# ${TICKET}: ${title}"
+    if [ -n "$TICKET_DESCRIPTION" ]; then
+      echo ""
+      echo "## Description"
+      echo ""
+      echo "$TICKET_DESCRIPTION"
+    fi
+    if [ -n "$TICKET_STEPS_TO_REPRODUCE" ]; then
+      echo ""
+      echo "## Steps to Reproduce"
+      echo ""
+      echo "$TICKET_STEPS_TO_REPRODUCE"
+    fi
+  } > "$dir/JIRA.md"
+}
+
+if [ $# -eq 0 ]; then
+  # No-arg mode: fzf picker from Jira assigned tickets
+  require_eval_file
+
+  RESULTS=$("$TICKET_LIB_DIR/find-jira-tickets")
+  if [ -z "$RESULTS" ]; then
+    echo "No assigned tickets found." >&2
+    exit 1
+  fi
+
+  CHOICE=$(echo "$RESULTS" | fzf --prompt="Jira ticket> " --height=~20 --reverse --no-sort --delimiter=$'\t' --with-nth=1,2,3)
+  if [ -z "$CHOICE" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+
+  SELECTED=$(echo "$CHOICE" | cut -f1)
+  SELECTED_SUMMARY=$(echo "$CHOICE" | cut -f3)
+  SELECTED_TYPE=$(echo "$CHOICE" | cut -f4)
+
+  if [ -f "$TICKETS_DIR/$SELECTED.yaml" ]; then
+    echo "$SELECTED already exists locally. Press enter to re-sync from GitHub, or ctrl-c to abort." >&2
+    read -r </dev/tty
+  fi
+
+  # Re-invoke self with the selected ticket key — run in subshell, capture eval output
+  OUTPUT=$(TICKET_CONFIRMED=1 TICKET_GLOBAL="${TICKET_GLOBAL:-0}" TICKET_SUMMARY="$SELECTED_SUMMARY" TICKET_ISSUE_TYPE="$SELECTED_TYPE" "$0" "$SELECTED")
+  echo "$OUTPUT" > "$EVAL_FILE"
+  exit 0
+fi
+
+TICKET="$1"
+
+# Validate ticket number format
+if [[ ! "$TICKET" =~ ^[A-Z]+-[0-9]+$ ]]; then
+  echo "Error: '$TICKET' doesn't look like a ticket number (expected e.g. UIEXT-3141)" >&2
+  exit 1
+fi
+
+if [ -f "$TICKETS_DIR/$TICKET.yaml" ] && [ "${TICKET_CONFIRMED:-0}" != "1" ]; then
+  echo "$TICKET already exists locally. Press enter to re-sync from GitHub, or ctrl-c to abort." >&2
+  read -r </dev/tty
+fi
+
+# Ask whether to search GitHub for existing branches
+echo -n "Search GitHub for existing branches? [Y/n] " >&2
+read -rsn1 search_choice </dev/tty
+echo >&2
+RESULTS=""
+if [[ ! "$search_choice" =~ ^[Nn]$ ]]; then
+  echo "Looking up branches for $TICKET on GitHub..." >&2
+  RESULTS=$("$TICKET_LIB_DIR/find-ticket-branches" "$TICKET")
+fi
+
+# Fetch ticket description from Jira (for JIRA.md in ticket dir)
+TICKET_DESCRIPTION=""
+TICKET_SUMMARY_JIRA=""
+TICKET_STEPS_TO_REPRODUCE=""
+if [ -n "${KNIME_ATLASSIAN_EMAIL:-}" ] && [ -n "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
+  JIRA_DESC_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+    -H "Accept: application/json" \
+    "https://knime-com.atlassian.net/rest/api/2/issue/${TICKET}?fields=description,summary,customfield_11444")
+  TICKET_DESCRIPTION=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.description // ""')
+  TICKET_SUMMARY_JIRA=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.summary // ""')
+  TICKET_STEPS_TO_REPRODUCE=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.customfield_11444 // ""')
+fi
+
+if [ -z "$RESULTS" ]; then
+  # No branches found — help user create a branch name
+  SUMMARY="${TICKET_SUMMARY:-}"
+  ISSUE_TYPE="${TICKET_ISSUE_TYPE:-}"
+
+  # Fetch from Jira if not provided via env (direct invocation case)
+  if [ -z "$SUMMARY" ] || [ -z "$ISSUE_TYPE" ]; then
+    if [ -z "${KNIME_ATLASSIAN_EMAIL:-}" ] || [ -z "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
+      echo "Error: No branches found for $TICKET and Jira credentials not set." >&2
+      echo "Set KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN to create a branch name." >&2
+      exit 1
+    fi
+    JIRA_BASE="https://knime-com.atlassian.net"
+    echo "Fetching ticket info from Jira..." >&2
+    JIRA_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+      -H "Accept: application/json" \
+      "${JIRA_BASE}/rest/api/3/issue/${TICKET}?fields=summary,issuetype")
+    SUMMARY=$(echo "$JIRA_RESPONSE" | jq -r '.fields.summary')
+    ISSUE_TYPE=$(echo "$JIRA_RESPONSE" | jq -r '.fields.issuetype.name')
+  fi
+
+  echo "No branches found for $TICKET — creating branch name." >&2
+  echo "Ticket type: $ISSUE_TYPE" >&2
+
+  # Look up saved prefix for this issue type, or let user pick
+  PREFIXES_FILE="$TICKETS_DIR/.type-prefixes"
+  PREFIX=""
+  if [ -f "$PREFIXES_FILE" ]; then
+    PREFIX=$(grep "^${ISSUE_TYPE}=" "$PREFIXES_FILE" 2>/dev/null | cut -d= -f2 || true)
+  fi
+
+  if [ -n "$PREFIX" ]; then
+    echo "Using saved prefix: $PREFIX (for $ISSUE_TYPE)" >&2
+  else
+    PREFIX=$(printf 'enh\nfix\ntodo' | fzf --prompt="Branch prefix for '$ISSUE_TYPE'> " --height=~5 --reverse)
+    if [ -z "$PREFIX" ]; then
+      echo "Aborted." >&2
+      exit 1
+    fi
+    # Remember for future tickets of this type
+    mkdir -p "$TICKETS_DIR"
+    echo "${ISSUE_TYPE}=${PREFIX}" >> "$PREFIXES_FILE"
+    echo "Saved: $ISSUE_TYPE → $PREFIX" >&2
+  fi
+
+  # Instant slug from bash, AI improvement on tab
+  SLUG=$(echo "$SUMMARY" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-60)
+  SLUG_SOURCE="fallback"
+  BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+
+  # Ask for confirmation — tab to improve with AI
+  while true; do
+    echo "" >&2
+    echo "Branch: $BRANCH  (via $SLUG_SOURCE)" >&2
+    echo "" >&2
+    echo "Press enter to confirm, tab to improve with AI, ctrl-c to abort." >&2
+    IFS= read -rsn1 key </dev/tty
+
+    if [ "$key" = $'\t' ]; then
+      if [ "$SLUG_SOURCE" = "fallback" ]; then
+        # First tab: race Claude vs Copilot for a better slug
+        echo "Generating..." >&2
+        SLUG_PROMPT="Output ONLY a kebab-case slug of about 5 lowercase words separated by hyphens. No explanation, no quotes, no backticks. Just the slug for this Jira title: ${SUMMARY}"
+
+        SLUG_DIR=$(mktemp -d)
+
+        (claude -p --model haiku --effort low "$SLUG_PROMPT" 2>/dev/null > "$SLUG_DIR/claude" && echo claude > "$SLUG_DIR/winner") &
+        PID_CLAUDE=$!
+        (copilot -p "$SLUG_PROMPT" --model "gpt-4.1-mini" -s 2>/dev/null > "$SLUG_DIR/copilot" && echo copilot > "$SLUG_DIR/winner") &
+        PID_COPILOT=$!
+
+        while [ ! -f "$SLUG_DIR/winner" ]; do
+          kill -0 $PID_CLAUDE 2>/dev/null || kill -0 $PID_COPILOT 2>/dev/null || break
+          sleep 0.05
+        done
+
+        WINNER=$(cat "$SLUG_DIR/winner" 2>/dev/null || true)
+        RAW_SLUG=""
+        if [ "$WINNER" = "claude" ]; then
+          RAW_SLUG=$(cat "$SLUG_DIR/claude")
+          kill $PID_COPILOT 2>/dev/null || true
+        elif [ "$WINNER" = "copilot" ]; then
+          RAW_SLUG=$(cat "$SLUG_DIR/copilot")
+          kill $PID_CLAUDE 2>/dev/null || true
+        fi
+        wait $PID_CLAUDE 2>/dev/null || true
+        wait $PID_COPILOT 2>/dev/null || true
+        rm -rf "$SLUG_DIR"
+
+        NEW_SLUG=$(echo "$RAW_SLUG" | tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        if [ -n "$NEW_SLUG" ]; then
+          SLUG="$NEW_SLUG"
+          BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+          SLUG_SOURCE="$WINNER"
+        else
+          echo "  AI generation failed, keeping current slug." >&2
+        fi
+      else
+        # Subsequent tabs: refine with instruction
+        echo "" >&2
+        echo -n "How to improve: " >&2
+        read -r REFINEMENT </dev/tty
+        echo "Refining..." >&2
+        RAW_SLUG=$(claude -p --model haiku --effort low "Current branch slug: ${SLUG}. Original title: ${SUMMARY}. User wants: ${REFINEMENT}. Output ONLY the improved kebab-case slug (about 5 lowercase words, hyphens, nothing else)." 2>/dev/null || true)
+        NEW_SLUG=$(echo "$RAW_SLUG" | tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        if [ -n "$NEW_SLUG" ]; then
+          SLUG="$NEW_SLUG"
+          BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+          SLUG_SOURCE="claude"
+        else
+          echo "  Refinement failed, keeping current slug." >&2
+        fi
+      fi
+    else
+      # Enter = confirm
+      break
+    fi
+  done
+
+  # Create ticket YAML with no repos yet
+  mkdir -p "$TICKETS_DIR"
+  YAML_FILE=$(ticket_yaml_file "$TICKET")
+
+  cat > "$YAML_FILE" <<YAML
+ticket: $TICKET
+name: "$SUMMARY"
+branches:
+  $BRANCH:
+    repos: {}
+YAML
+  echo "Created ticket $TICKET" >&2
+
+  # Set active ticket + update MRU
+  set_active_ticket "$TICKET"
+
+  # Create tc base directory
+  TICKET_DIR=$(ticket_dir "$BRANCH")
+
+  # Write Jira description to separate file (tc will merge into CLAUDE.md)
+  write_jira_md "$TICKET_DIR" "${TICKET_SUMMARY_JIRA:-$SUMMARY}"
+
+  echo "Ticket $TICKET ready (no repos yet)." >&2
+
+  # Output eval commands — TICKET_NEEDS_ADD_REPO triggers add-repo picker in shell function
+  echo "export ACTIVE_TICKET=$TICKET"
+  echo "TICKET_NEEDS_ADD_REPO=1"
+  echo "cd '$TICKET_DIR'"
+  exit 0
+fi
+
+# Parse results into arrays: repo\tbranch per line
+REPO_NAMES=()
+BRANCH_NAMES=()
+while IFS=$'\t' read -r repo branch; do
+  REPO_NAMES+=("$repo")
+  BRANCH_NAMES+=("$branch")
+done <<< "$RESULTS"
+
+echo "Found ${#REPO_NAMES[@]} repo(s):" >&2
+
+# Collect unique branch names
+UNIQUE_BRANCHES=($(printf '%s\n' "${BRANCH_NAMES[@]}" | sort -u))
+
+BRANCH=""
+if [ ${#UNIQUE_BRANCHES[@]} -eq 1 ]; then
+  BRANCH="${UNIQUE_BRANCHES[0]}"
+  echo "  Branch: $BRANCH" >&2
+elif [ ${#UNIQUE_BRANCHES[@]} -gt 1 ]; then
+  echo "  Multiple branch names found:" >&2
+  for b in "${UNIQUE_BRANCHES[@]}"; do
+    # Show which repos have this branch
+    repos_for_branch=()
+    for i in "${!BRANCH_NAMES[@]}"; do
+      if [ "${BRANCH_NAMES[$i]}" = "$b" ]; then
+        repos_for_branch+=("${REPO_NAMES[$i]}")
+      fi
+    done
+    echo "    $b (${repos_for_branch[*]})" >&2
+  done
+  BRANCH=$(printf '%s\n' "${UNIQUE_BRANCHES[@]}" | fzf --prompt="Pick branch> " --height=~10 --reverse </dev/tty)
+  if [ -z "$BRANCH" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+fi
+
+# Filter repos to only those with the selected branch
+SELECTED_REPOS=()
+for i in "${!BRANCH_NAMES[@]}"; do
+  if [ "${BRANCH_NAMES[$i]}" = "$BRANCH" ]; then
+    SELECTED_REPOS+=("${REPO_NAMES[$i]}")
+  fi
+done
+
+for r in "${SELECTED_REPOS[@]}"; do
+  echo "  $r" >&2
+done
+
+# Create or update ticket YAML
+mkdir -p "$TICKETS_DIR"
+YAML_FILE=$(ticket_yaml_file "$TICKET")
+
+if [ -f "$YAML_FILE" ]; then
+  echo "Ticket $TICKET already exists — adding newly found repos..." >&2
+  for repo in "${SELECTED_REPOS[@]}"; do
+    "$TICKET_LIB_DIR/update-ticket-yaml" "$YAML_FILE" "$BRANCH" "$repo"
+  done
+else
+  # Derive human-readable name from branch slug
+  if [[ "$BRANCH" =~ ^([a-z]+/)?[A-Z]+-[0-9]+-(.+)$ ]]; then
+    SLUG="${BASH_REMATCH[2]}"
+    NAME=$(echo "$SLUG" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+  else
+    NAME="$TICKET"
+  fi
+
+  # Build repos block
+  REPOS_BLOCK=""
+  for repo in "${SELECTED_REPOS[@]}"; do
+    REPOS_BLOCK+="      ${repo}:
+        plugins: []
+"
+  done
+
+  cat > "$YAML_FILE" <<EOF
+ticket: $TICKET
+name: "$NAME"
+branches:
+  $BRANCH:
+    repos:
+$REPOS_BLOCK
+EOF
+  echo "Created ticket $TICKET" >&2
+fi
+
+# Set up bare repos and worktrees for all discovered repos
+for repo in "${SELECTED_REPOS[@]}"; do
+  ensure_bare_repo "$repo"
+  ensure_worktree "$repo" "$BRANCH" --skip-on-missing || continue
+done
+
+# Set active ticket + update MRU
+set_active_ticket "$TICKET"
+
+# Create tc base directory
+TICKET_DIR=$(ticket_dir "$BRANCH")
+
+# Write Jira description to separate file (tc will merge into CLAUDE.md)
+write_jira_md "$TICKET_DIR" "$TICKET_SUMMARY_JIRA"
+
+echo "Ticket $TICKET ready." >&2
+
+# Output eval commands for the shell function
+echo "export ACTIVE_TICKET=$TICKET"
+echo "cd '$TICKET_DIR'"

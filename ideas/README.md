@@ -41,10 +41,17 @@
      │ (working package)  │
      └────────┬───────────┘
               │
-              │  pick up & implement
+              │  pick up
+              ▼
+     ┌─────────────────────────┐
+     │ in-progress/<name>.md   │
+     │ + spec.md (optional)    │
+     └────────┬────────────────┘
+              │
+              │  done
               ▼
         ┌───────────┐
-        │  execute   │
+        │  archive   │
         └───────────┘
 ```
 
@@ -52,6 +59,7 @@
 
 - `ideas/*.md` — **Inbox**: Raw, unqualified ideas captured via the `idea` command. This is where new ideas land.
 - `ideas/backlog/` — **Backlog**: Qualified ideas and specced-out working packages (`.md` files) ready to be picked up.
+- `ideas/in-progress/` — **In Progress**: Working packages currently being implemented. May include a `spec.md` with detailed design.
 - `ideas/later/` — **Later**: Interesting ideas that aren't urgent. Revisit periodically.
 - `ideas/meta-add-ideas-framework/` — Documentation for the idea capture tooling itself.
 
@@ -112,4 +120,4 @@ A **working package** is a specced-out unit of work originating from one or more
 
 ### 4. Execute
 
-Pick a working package from `ideas/backlog/` and implement it. What happens to the file after completion is not yet defined.
+Pick a working package from `ideas/backlog/` and move it to `ideas/in-progress/`. Optionally create a `spec.md` alongside it with detailed design, UX simulation, or implementation notes. When done, archive or delete the files from `in-progress/`.

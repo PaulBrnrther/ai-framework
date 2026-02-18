@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Remove a repo (and its plugins) from a ticket YAML file under a given branch.
+
+Usage: remove-repo-from-yaml <yaml_file> <branch> <repo>
+"""
+import sys
+import re
+
+yaml_file = sys.argv[1]
+branch = sys.argv[2]
+repo = sys.argv[3]
+
+with open(yaml_file) as f:
+    lines = f.read().split("\n")
+
+in_branch = False
+repo_start = None
+repo_end = None
+
+i = 0
+while i < len(lines):
+    stripped = lines[i].rstrip()
+
+    if stripped == f"  {branch}:":
+        in_branch = True
+        i += 1
+        continue
+    if not in_branch:
+        i += 1
+        continue
+    # Next branch
+    if len(stripped) > 2 and stripped[0:2] == "  " and stripped[2] != " " and "/" in stripped:
+        break
+
+    # Found the repo line
+    if stripped.strip() == f"{repo}:":
+        repo_start = i
+        # Find end: next repo line, next branch, or end of indented block
+        j = i + 1
+        while j < len(lines):
+            next_stripped = lines[j].rstrip()
+            # Next repo (6-space indent, ends with colon, not plugins/frontend)
+            if re.match(r"^      [a-z]", next_stripped) and next_stripped.endswith(":") and "plugins" not in next_stripped and "frontend" not in next_stripped:
+                break
+            # Next branch
+            if len(next_stripped) > 2 and next_stripped[0:2] == "  " and next_stripped[2] != " " and "/" in next_stripped:
+                break
+            # End of file or top-level key
+            if next_stripped and not next_stripped.startswith("      ") and not next_stripped.startswith("        ") and not next_stripped.startswith("          "):
+                if not next_stripped.startswith(" "):
+                    break
+            j += 1
+        repo_end = j
+        break
+
+    i += 1
+
+if repo_start is not None:
+    new_lines = lines[:repo_start] + lines[repo_end:]
+    with open(yaml_file, "w") as f:
+        f.write("\n".join(new_lines))
+    print(f"Removed {repo} from {branch}", file=sys.stderr)
+else:
+    print(f"Repo {repo} not found under {branch}", file=sys.stderr)
+    sys.exit(1)

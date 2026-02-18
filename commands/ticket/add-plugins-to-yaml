@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Add plugins to a ticket YAML file under a given branch and repo.
+
+Usage: add-plugins-to-yaml <yaml_file> <branch> <repo> <plugins_file>
+  plugins_file: one plugin name per line
+
+Shared by ticket-sync-plugins (auto-detect) and ticket-plugins (manual pick).
+"""
+import sys
+import re
+
+yaml_file = sys.argv[1]
+branch = sys.argv[2]
+repo = sys.argv[3]
+plugin_file = sys.argv[4]
+
+with open(plugin_file) as f:
+    plugins = [line.strip() for line in f if line.strip()]
+
+if not plugins:
+    sys.exit(0)
+
+with open(yaml_file) as f:
+    lines = f.read().split("\n")
+
+in_branch = False
+current_repo = None
+i = 0
+inserted = False
+
+while i < len(lines):
+    stripped = lines[i].rstrip()
+
+    if stripped == f"  {branch}:":
+        in_branch = True
+        i += 1
+        continue
+    if not in_branch:
+        i += 1
+        continue
+    # Next branch
+    if len(stripped) > 2 and stripped[0:2] == "  " and stripped[2] != " " and "/" in stripped:
+        break
+
+    # Repo line
+    if re.match(r"^      [a-z]", stripped) and stripped.endswith(":") and "plugins" not in stripped and "frontend" not in stripped:
+        current_repo = stripped.strip().rstrip(":")
+        i += 1
+        continue
+
+    # plugins: line — insert new plugins here
+    plugins_line = stripped.strip()
+    if current_repo == repo and (plugins_line == "plugins:" or plugins_line == "plugins: []"):
+        # If it's "plugins: []", convert to multiline format
+        if plugins_line == "plugins: []":
+            indent = len(stripped) - len(stripped.lstrip())
+            lines[i] = " " * indent + "plugins:"
+
+        # Find insertion point (after last existing plugin or right after plugins:)
+        insert_idx = i + 1
+        while insert_idx < len(lines):
+            next_line = lines[insert_idx].rstrip()
+            if next_line.strip().startswith("- "):
+                insert_idx += 1
+                # Skip jars_fetched line if present
+                if insert_idx < len(lines) and "jars_fetched:" in lines[insert_idx]:
+                    insert_idx += 1
+            else:
+                break
+
+        # Insert new plugins
+        for plugin in reversed(plugins):
+            lines.insert(insert_idx, f"          - {plugin}")
+
+        inserted = True
+        break
+
+    i += 1
+
+if inserted:
+    with open(yaml_file, "w") as f:
+        f.write("\n".join(lines))
+    print(f"Added {len(plugins)} plugin(s) to {repo}", file=sys.stderr)
+else:
+    print(f"Error: Could not find plugins section for {repo} in {yaml_file}", file=sys.stderr)
+    sys.exit(1)

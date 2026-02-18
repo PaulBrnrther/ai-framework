@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket status — show current ticket state
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+
+# Colors
+BOLD='\033[1m'
+DIM='\033[2m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+RED='\033[31m'
+CYAN='\033[36m'
+RESET='\033[0m'
+
+# Read active ticket
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "No active ticket." >&2
+  exit 0
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Active ticket $ACTIVE_TICKET but no YAML found at $YAML_FILE" >&2
+  exit 1
+fi
+
+# Parse ticket name
+NAME=$(grep '^name:' "$YAML_FILE" | sed 's/^name: //;s/^"//;s/"$//')
+
+echo -e "${BOLD}Active ticket: ${CYAN}$ACTIVE_TICKET${RESET} ${DIM}($NAME)${RESET}" >&2
+echo "" >&2
+
+# Get branches
+BRANCHES=($(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/://;s/^[[:space:]]*//'))
+
+for branch in "${BRANCHES[@]}"; do
+  echo -e "${BOLD}Branch: ${GREEN}$branch${RESET}" >&2
+
+  while IFS= read -r repo; do
+    BARE_REPO="$REPOS_DIR/$repo.git"
+    WORKTREE_PATH="$BARE_REPO/branches/$branch"
+
+    if [ -d "$WORKTREE_PATH" ]; then
+      # Commits since branching off master
+      merge_base=$(git -C "$WORKTREE_PATH" merge-base HEAD origin/master 2>/dev/null || echo "")
+      if [ -n "$merge_base" ]; then
+        commits_ahead_master=$(git -C "$WORKTREE_PATH" rev-list --count "$merge_base..HEAD" 2>/dev/null || echo "0")
+      else
+        commits_ahead_master="?"
+      fi
+
+      # Ahead/behind upstream
+      upstream=$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref "@{upstream}" 2>/dev/null || echo "")
+      if [ -n "$upstream" ]; then
+        ahead=$(git -C "$WORKTREE_PATH" rev-list --count "$upstream..HEAD" 2>/dev/null || echo "0")
+        behind=$(git -C "$WORKTREE_PATH" rev-list --count "HEAD..$upstream" 2>/dev/null || echo "0")
+        if [ "$ahead" = "0" ] && [ "$behind" = "0" ]; then
+          upstream_info="${DIM}↑0 ↓0${RESET}"
+        else
+          ahead_color="$DIM"; [ "$ahead" != "0" ] && ahead_color="$GREEN"
+          behind_color="$DIM"; [ "$behind" != "0" ] && behind_color="$RED"
+          upstream_info="${ahead_color}↑${ahead}${RESET} ${behind_color}↓${behind}${RESET}"
+        fi
+      else
+        upstream_info="${DIM}no upstream${RESET}"
+      fi
+
+      # Uncommitted changes (staged + unstaged + untracked file count)
+      dirty_count=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+      # Build summary line
+      if [ "$commits_ahead_master" = "0" ]; then
+        commits_color="$DIM"
+      else
+        commits_color="$CYAN"
+      fi
+      summary="${commits_color}${commits_ahead_master} commits${RESET}"
+      summary+=", ${upstream_info}"
+      if [ "$dirty_count" -gt 0 ] 2>/dev/null; then
+        summary+=", ${YELLOW}${dirty_count} dirty${RESET}"
+      fi
+
+      echo -e "  ${BOLD}$repo${RESET}  ${DIM}[${RESET}${summary}${DIM}]${RESET}" >&2
+    else
+      echo -e "  ${BOLD}$repo${RESET}  ${DIM}[${RED}worktree missing${RESET}${DIM}]${RESET}" >&2
+    fi
+  done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")
+done

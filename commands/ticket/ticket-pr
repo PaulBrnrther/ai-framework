@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket pr — open the GitHub PR for the active ticket's branch in the browser.
+#
+# If the current directory is inside a ticket worktree, that repo is used.
+# If there are multiple repos and no current match, an fzf picker is shown.
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+EVAL_FILE="${TICKET_EVAL_FILE:-}"
+require_eval_file
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# Get the active branch (first one if multiple)
+BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+
+if [ -z "$BRANCH" ]; then
+  echo "Error: No branches found in $YAML_FILE" >&2
+  exit 1
+fi
+
+# Collect repos for this branch
+REPOS=()
+while IFS= read -r repo; do
+  REPOS+=("$repo")
+done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$BRANCH")
+
+if [ ${#REPOS[@]} -eq 0 ]; then
+  echo "Error: No repos found for ticket $ACTIVE_TICKET." >&2
+  exit 1
+fi
+
+# Try to detect which repo we're currently in
+CURRENT_REPO=""
+for repo in "${REPOS[@]}"; do
+  wt="$REPOS_DIR/$repo.git/branches/$BRANCH"
+  if [[ "$PWD" == "$wt"* ]]; then
+    CURRENT_REPO="$repo"
+    break
+  fi
+done
+
+# Pick a repo
+REPO=""
+if [ -n "$CURRENT_REPO" ]; then
+  REPO="$CURRENT_REPO"
+elif [ ${#REPOS[@]} -eq 1 ]; then
+  REPO="${REPOS[0]}"
+else
+  REPO=$(printf '%s\n' "${REPOS[@]}" | fzf --prompt="Open PR for repo> " --height=~10 --reverse </dev/tty)
+  if [ -z "$REPO" ]; then
+    echo "Aborted." >&2
+    exit 1
+  fi
+fi
+
+WORKTREE_PATH="$REPOS_DIR/$REPO.git/branches/$BRANCH"
+
+if [ ! -d "$WORKTREE_PATH" ]; then
+  echo "Error: Worktree not found at $WORKTREE_PATH" >&2
+  exit 1
+fi
+
+echo "Opening PR for $REPO ($BRANCH)..." >&2
+if ! (cd "$WORKTREE_PATH" && gh pr view "$BRANCH" --web 2>/dev/null); then
+  echo "No open PR found for branch '$BRANCH' in $REPO." >&2
+  echo "To create one: gh pr create --repo knime/$REPO" >&2
+  exit 1
+fi

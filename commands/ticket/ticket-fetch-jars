@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Fetch jars for plugins that have lib/fetch_jars/pom.xml."""
+import os
+import sys
+import subprocess
+import re
+
+TICKETS_DIR = os.path.expanduser("~/.tickets")
+REPOS_DIR = os.path.expanduser("~/knime/repos")
+
+# --- Read active ticket from env ---
+active_ticket = os.environ.get("ACTIVE_TICKET", "")
+if not active_ticket:
+    print("No active ticket (ACTIVE_TICKET not set).", file=sys.stderr)
+    sys.exit(1)
+
+yaml_file = os.path.join(TICKETS_DIR, f"{active_ticket}.yaml")
+if not os.path.isfile(yaml_file):
+    print(f"Ticket YAML not found: {yaml_file}", file=sys.stderr)
+    sys.exit(1)
+
+with open(yaml_file) as f:
+    content = f.read()
+    lines = content.split("\n")
+
+# First pass: collect all plugins that need processing
+# Structure: [(branch, repo, plugin_name, line_idx, already_processed), ...]
+# already_processed = True if jars_fetched or no_jars is already set
+plugins_to_check = []
+
+branches = []
+for line in lines:
+    if re.match(r"^  ([a-z]+/)?[A-Z]+-[0-9]+-", line):
+        branches.append(line.strip().rstrip(":"))
+
+for branch in branches:
+    in_branch = False
+    current_repo = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.rstrip()
+
+        if stripped == f"  {branch}:":
+            in_branch = True
+            i += 1
+            continue
+        if not in_branch:
+            i += 1
+            continue
+
+        # Exit branch
+        if len(stripped) > 2 and stripped[0:2] == "  " and stripped[2] != " " and "/" in stripped:
+            break
+
+        # Repo line
+        if re.match(r"^      [a-z]", stripped) and stripped.endswith(":") and "plugins" not in stripped and "frontend" not in stripped:
+            current_repo = stripped.strip().rstrip(":")
+            i += 1
+            continue
+
+        # Plugin line
+        if stripped.strip().startswith("- ") and current_repo:
+            rest = stripped.strip()[2:]
+            plugin_line_idx = i
+
+            # Check format: string or object
+            if rest.startswith("name:"):
+                plugin_name = rest.split("name:")[1].strip()
+                # Check if next line has jars_fetched or no_jars
+                already_processed = False
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    if "jars_fetched: true" in next_line or "no_jars: true" in next_line:
+                        already_processed = True
+            elif ":" not in rest:
+                plugin_name = rest.split("#")[0].strip()
+                already_processed = False
+            else:
+                i += 1
+                continue
+
+            plugins_to_check.append((branch, current_repo, plugin_name, plugin_line_idx, already_processed))
+
+        i += 1
+
+# Second pass: fetch jars and track updates
+# updates: [(line_idx, plugin_name, "jars_fetched" | "no_jars"), ...]
+updates = []
+
+for branch, repo, plugin_name, line_idx, already_processed in plugins_to_check:
+    if already_processed:
+        continue
+
+    # Find worktree path
+    worktree_path = os.path.join(REPOS_DIR, f"{repo}.git", "branches", branch)
+    if not os.path.isdir(worktree_path):
+        # Try symlink
+        worktree_path = os.path.join(REPOS_DIR, repo)
+
+    fetch_jars_pom = os.path.join(worktree_path, plugin_name, "lib", "fetch_jars", "pom.xml")
+
+    if not os.path.isfile(fetch_jars_pom):
+        # No fetch_jars directory - mark as no_jars
+        updates.append((line_idx, plugin_name, "no_jars"))
+        continue
+
+    print(f"Fetching jars for {plugin_name}...", file=sys.stderr)
+    fetch_dir = os.path.dirname(fetch_jars_pom)
+    result = subprocess.run(
+        ["mvn", "clean", "package", "-q"],
+        cwd=fetch_dir,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode == 0:
+        print(f"  ✓ {plugin_name}", file=sys.stderr)
+        updates.append((line_idx, plugin_name, "jars_fetched"))
+    else:
+        print(f"  ✗ {plugin_name}: mvn failed", file=sys.stderr)
+        if result.stderr:
+            print(f"    {result.stderr[:200]}", file=sys.stderr)
+
+# Third pass: update YAML
+if updates:
+    # Sort by line index descending so inserts don't mess up indices
+    updates.sort(key=lambda x: x[0], reverse=True)
+
+    for line_idx, plugin_name, flag_type in updates:
+        old_line = lines[line_idx]
+        indent = len(old_line) - len(old_line.lstrip())
+
+        if "name:" not in old_line:
+            # Convert string to object format
+            lines[line_idx] = " " * indent + f"- name: {plugin_name}"
+            lines.insert(line_idx + 1, " " * indent + f"  {flag_type}: true")
+        else:
+            # Already object format
+            lines.insert(line_idx + 1, " " * indent + f"  {flag_type}: true")
+
+    with open(yaml_file, "w") as f:
+        f.write("\n".join(lines))
+    print(f"Updated {yaml_file}", file=sys.stderr)
+else:
+    print("No jars to fetch.", file=sys.stderr)

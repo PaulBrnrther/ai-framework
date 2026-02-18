@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket repo-delete — pick a repo to remove from ticket YAML + worktree
+#
+# Usage: ticket repo-delete  (fzf picker)
+# Removes from YAML and tries to remove the worktree (without --force).
+
+TICKETS_DIR="$HOME/.tickets"
+REPOS_DIR="$HOME/knime/repos"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE="$TICKETS_DIR/$ACTIVE_TICKET.yaml"
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# Get branch
+BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+if [ -z "$BRANCH" ]; then
+  echo "Error: No branches in $YAML_FILE" >&2
+  exit 1
+fi
+
+# Get tracked repos via shared helper
+REPOS=$("$SCRIPT_DIR/parse-ticket-repos" "$YAML_FILE" "$BRANCH")
+
+if [ -z "$REPOS" ]; then
+  echo "No repos tracked for $ACTIVE_TICKET." >&2
+  exit 0
+fi
+
+# fzf picker
+SELECTED=$(echo "$REPOS" | fzf --prompt="Remove repo ($ACTIVE_TICKET)> " --height=~10 --reverse)
+if [ -z "$SELECTED" ]; then
+  echo "Aborted." >&2
+  exit 1
+fi
+
+# Remove worktree (without force — will fail if there are uncommitted changes)
+BARE_REPO="$REPOS_DIR/$SELECTED.git"
+WORKTREE_PATH="$BARE_REPO/branches/$BRANCH"
+if [ -d "$WORKTREE_PATH" ]; then
+  if git -C "$BARE_REPO" worktree remove "$WORKTREE_PATH" 2>&1; then
+    echo "Removed worktree: $SELECTED" >&2
+  else
+    echo "Worktree has uncommitted changes." >&2
+    echo "Force remove? (enter to confirm, ctrl-c to skip)" >&2
+    read -r </dev/tty
+    git -C "$BARE_REPO" worktree remove --force "$WORKTREE_PATH" >&2
+    echo "Force-removed worktree: $SELECTED" >&2
+  fi
+fi
+
+# Remove from YAML
+"$SCRIPT_DIR/remove-repo-from-yaml" "$YAML_FILE" "$BRANCH" "$SELECTED"

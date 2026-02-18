@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# update-symlinks — update ~/knime/repos/<repo> symlinks for the active ticket.
+# Called automatically when the globally active ticket changes.
+#
+# For each repo in the ticket YAML, ensures the symlink points to the
+# correct worktree. Backs up real directories to remember-local/.
+#
+# Usage: update-symlinks <ticket>
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+REMEMBER_LOCAL_DIR="$REPOS_DIR/remember-local"
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <ticket>" >&2
+  exit 1
+fi
+
+TICKET="$1"
+YAML_FILE=$(ticket_yaml_file "$TICKET")
+
+if [ ! -f "$YAML_FILE" ]; then
+  echo "No YAML found for $TICKET, skipping symlink update." >&2
+  exit 0
+fi
+
+# Extract all branch names from the YAML
+BRANCHES=$(grep -E '^ {2}[a-z]+/[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/^ *//;s/:$//' || true)
+
+if [ -z "$BRANCHES" ]; then
+  exit 0
+fi
+
+mkdir -p "$REMEMBER_LOCAL_DIR"
+
+echo "Updating symlinks for $TICKET..." >&2
+
+while IFS= read -r branch; do
+  # Get repos for this branch
+  REPOS=$("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")
+
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    REPO_PATH="$REPOS_DIR/$repo"
+    BARE_REPO="$REPOS_DIR/$repo.git"
+    WORKTREE_PATH="$BARE_REPO/branches/$branch"
+
+    if [ ! -d "$WORKTREE_PATH" ]; then
+      echo "  $repo: worktree not found, skipping" >&2
+      continue
+    fi
+
+    if [ -L "$REPO_PATH" ]; then
+      CURRENT_TARGET=$(readlink "$REPO_PATH")
+      if [ "$CURRENT_TARGET" = "$WORKTREE_PATH" ]; then
+        echo "  $repo: already correct" >&2
+        continue
+      fi
+      rm "$REPO_PATH"
+      ln -s "$WORKTREE_PATH" "$REPO_PATH"
+      echo "  $repo: updated -> $WORKTREE_PATH" >&2
+    elif [ -d "$REPO_PATH" ]; then
+      BACKUP_PATH="$REMEMBER_LOCAL_DIR/$repo"
+      if [ -e "$BACKUP_PATH" ]; then
+        echo "  $repo: backup already exists, skipping" >&2
+        continue
+      fi
+      echo "  $repo: backing up to remember-local/" >&2
+      mv "$REPO_PATH" "$BACKUP_PATH"
+      ln -s "$WORKTREE_PATH" "$REPO_PATH"
+      echo "  $repo: created -> $WORKTREE_PATH" >&2
+    elif [ ! -e "$REPO_PATH" ]; then
+      ln -s "$WORKTREE_PATH" "$REPO_PATH"
+      echo "  $repo: created -> $WORKTREE_PATH" >&2
+    else
+      echo "  $repo: unexpected file type, skipping" >&2
+    fi
+  done <<< "$REPOS"
+done <<< "$BRANCHES"

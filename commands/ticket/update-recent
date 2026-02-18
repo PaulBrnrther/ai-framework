@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Moves a ticket to the top of ~/.tickets/.recent
+
+TICKET="$1"
+RECENT_FILE="$HOME/.tickets/.recent"
+
+mkdir -p "$(dirname "$RECENT_FILE")"
+touch "$RECENT_FILE"
+
+# Remove existing entry, then prepend
+grep -v "^${TICKET}$" "$RECENT_FILE" > "$RECENT_FILE.tmp" || true
+echo "$TICKET" | cat - "$RECENT_FILE.tmp" > "$RECENT_FILE"
+rm -f "$RECENT_FILE.tmp"

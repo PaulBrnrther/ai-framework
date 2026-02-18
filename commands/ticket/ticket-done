@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket done — tear down a ticket by removing worktrees, symlinks, YAML, etc.
+#
+# Usage: eval "$(ticket done [TICKET])"
+# (wrapped by a shell function that evals the output)
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+
+TICKET="${1:-${ACTIVE_TICKET:-}}"
+if [ -z "$TICKET" ]; then
+  echo "Usage: ticket done [TICKET]" >&2
+  echo "  If no ticket specified, uses \$ACTIVE_TICKET" >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$TICKET")
+
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Ticket not found: $TICKET" >&2
+  exit 1
+fi
+
+# Parse branches from YAML (supports enh/UIEXT-1234-... and UIEXT-1234-...)
+BRANCHES=()
+while IFS= read -r b; do
+  BRANCHES+=("$b")
+done < <(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/://;s/^[[:space:]]*//')
+
+# Show what will be removed and ask for confirmation
+NAME=$(grep '^name:' "$YAML_FILE" | sed 's/^name: //;s/^"//;s/"$//')
+echo "Tear down ticket: $TICKET ($NAME)" >&2
+echo "" >&2
+echo "Will remove:" >&2
+for branch in "${BRANCHES[@]}"; do
+  echo "  Branch: $branch" >&2
+  while IFS= read -r repo; do
+    BARE_REPO="$REPOS_DIR/$repo.git"
+    WORKTREE_PATH="$BARE_REPO/branches/$branch"
+    if [ -d "$WORKTREE_PATH" ]; then
+      dirty=""
+      if ! git -C "$WORKTREE_PATH" diff --quiet 2>/dev/null || \
+         ! git -C "$WORKTREE_PATH" diff --cached --quiet 2>/dev/null; then
+        dirty=" (HAS UNCOMMITTED CHANGES)"
+      fi
+      echo "    Worktree: $repo$dirty" >&2
+    else
+      echo "    Repo: $repo (no worktree)" >&2
+    fi
+  done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")
+  NOTES_DIR="$HOME/knime/tickets/$branch"
+  if [ -d "$NOTES_DIR" ]; then
+    echo "    Notes: $NOTES_DIR" >&2
+  fi
+done
+echo "    YAML: $YAML_FILE" >&2
+echo "" >&2
+echo "Press enter to confirm, ctrl-c to abort." >&2
+read -r </dev/tty
+
+for branch in "${BRANCHES[@]}"; do
+  # Get repos for this branch using helper script
+  while IFS= read -r repo; do
+    BARE_REPO="$REPOS_DIR/$repo.git"
+    WORKTREE_PATH="$BARE_REPO/branches/$branch"
+    SYMLINK_PATH="$REPOS_DIR/$repo"
+
+    # Check for uncommitted changes
+    if [ -d "$WORKTREE_PATH" ]; then
+      if ! git -C "$WORKTREE_PATH" diff --quiet 2>/dev/null || \
+         ! git -C "$WORKTREE_PATH" diff --cached --quiet 2>/dev/null; then
+        echo "WARNING: $repo ($branch) has uncommitted changes" >&2
+      fi
+
+      # Remove worktree
+      if git -C "$BARE_REPO" worktree remove --force "$WORKTREE_PATH" 2>/dev/null; then
+        echo "Removed worktree: $repo ($branch)" >&2
+      else
+        # Fallback: manual removal if git worktree remove fails
+        rm -rf "$WORKTREE_PATH"
+        git -C "$BARE_REPO" worktree prune 2>/dev/null || true
+        echo "Removed worktree (manual): $repo ($branch)" >&2
+      fi
+    fi
+
+    # Remove symlink if it points to this worktree
+    if [ -L "$SYMLINK_PATH" ]; then
+      target=$(readlink "$SYMLINK_PATH")
+      if [ "$target" = "$WORKTREE_PATH" ]; then
+        rm "$SYMLINK_PATH"
+        echo "Removed symlink: $SYMLINK_PATH" >&2
+      fi
+    fi
+  done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")
+
+  # Remove notes directory
+  NOTES_DIR="$HOME/knime/tickets/$branch"
+  if [ -d "$NOTES_DIR" ]; then
+    rm -rf "$NOTES_DIR"
+    echo "Removed notes: $NOTES_DIR" >&2
+  fi
+done
+
+# Remove ticket YAML
+rm "$YAML_FILE"
+echo "Removed: $YAML_FILE" >&2
+
+# Update recent list (remove this ticket)
+sed -i '' "/^${TICKET}$/d" "$TICKETS_DIR/.recent" 2>/dev/null || true
+
+# Handle active ticket switching
+CURRENT_SYSTEM_TICKET=$(cat ~/.active-ticket 2>/dev/null || echo "")
+if [ "$CURRENT_SYSTEM_TICKET" = "$TICKET" ]; then
+  # System-wide active ticket was this one, switch to next most recent
+  NEXT=$(head -1 "$TICKETS_DIR/.recent" 2>/dev/null || echo "")
+  if [ -n "$NEXT" ]; then
+    set_active_ticket "$NEXT" --global
+    echo "Switched system-wide to: $NEXT" >&2
+    echo "export ACTIVE_TICKET=$NEXT"
+  else
+    clear_active_ticket
+    echo "No more active tickets" >&2
+    echo "unset ACTIVE_TICKET"
+  fi
+elif [ "${ACTIVE_TICKET:-}" = "$TICKET" ]; then
+  # Only terminal-local was this ticket
+  echo "unset ACTIVE_TICKET"
+fi
+
+# Remove Eclipse working set
+WORKINGSETS_XML="$HOME/programs/aarch64-workspace-v4/.metadata/.plugins/org.eclipse.ui.workbench/workingsets.xml"
+if [ -f "$WORKINGSETS_XML" ]; then
+  python3 -c "
+import re, sys
+ws_name = sys.argv[1]
+path = sys.argv[2]
+with open(path) as f:
+    content = f.read()
+pattern = re.compile(
+    r'<workingSet\b[^>]*\bname=\"' + re.escape(ws_name) + r'\"[^>]*/>\n?'
+    r'|'
+    r'<workingSet\b[^>]*\bname=\"' + re.escape(ws_name) + r'\"[^>]*>.*?</workingSet>\n?',
+    re.DOTALL,
+)
+new_content = pattern.sub('', content)
+if new_content != content:
+    with open(path, 'w') as f:
+        f.write(new_content)
+    print(f'Removed working set: {ws_name}', file=sys.stderr)
+" "$TICKET" "$WORKINGSETS_XML"
+fi
+
+echo "Ticket $TICKET done." >&2

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Sync plugins in ticket YAML with actually modified plugins (vs merge-base with master)."""
+import os
+import sys
+import subprocess
+import re
+import tempfile
+
+TICKETS_DIR = os.path.expanduser("~/.tickets")
+REPOS_DIR = os.path.expanduser("~/knime/repos")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- Read active ticket from env ---
+active_ticket = os.environ.get("ACTIVE_TICKET", "")
+if not active_ticket:
+    print("No active ticket (ACTIVE_TICKET not set).", file=sys.stderr)
+    sys.exit(1)
+
+yaml_file = os.path.join(TICKETS_DIR, f"{active_ticket}.yaml")
+if not os.path.isfile(yaml_file):
+    print(f"Ticket YAML not found: {yaml_file}", file=sys.stderr)
+    sys.exit(1)
+
+with open(yaml_file) as f:
+    content = f.read()
+    lines = content.split("\n")
+
+# Parse branches
+branches = []
+for line in lines:
+    if re.match(r"^  ([a-z]+/)?[A-Z]+-[0-9]+-", line):
+        branches.append(line.strip().rstrip(":"))
+
+# Build {branch: {repo: set(existing_plugins)}} using shared helpers
+existing_plugins = {}
+for branch in branches:
+    existing_plugins[branch] = {}
+    result = subprocess.run(
+        [os.path.join(SCRIPT_DIR, "parse-ticket-repos"), yaml_file, branch],
+        capture_output=True, text=True
+    )
+    for repo in result.stdout.strip().split("\n"):
+        if not repo:
+            continue
+        # Get existing plugins via shared helper
+        plugin_result = subprocess.run(
+            [os.path.join(SCRIPT_DIR, "parse-ticket-plugins"), yaml_file, branch, repo],
+            capture_output=True, text=True
+        )
+        existing_plugins[branch][repo] = set(
+            p for p in plugin_result.stdout.strip().split("\n") if p
+        )
+
+# Detect modified plugins for each repo
+new_plugins = {}  # {branch: {repo: [new_plugins]}}
+for branch in branches:
+    new_plugins[branch] = {}
+    for repo in existing_plugins[branch]:
+        bare_repo = os.path.join(REPOS_DIR, f"{repo}.git")
+        worktree_path = os.path.join(bare_repo, "branches", branch)
+
+        if not os.path.isdir(worktree_path):
+            print(f"  {repo}: worktree not found, skipping", file=sys.stderr)
+            continue
+
+        # Find merge-base with master
+        merge_base_result = subprocess.run(
+            ["git", "-C", worktree_path, "merge-base", "HEAD", "origin/master"],
+            capture_output=True, text=True
+        )
+        if merge_base_result.returncode != 0:
+            print(f"  {repo}: could not find merge-base with origin/master", file=sys.stderr)
+            continue
+        merge_base = merge_base_result.stdout.strip()
+
+        # Get all changed files since merge-base
+        diff_result = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--name-only", merge_base, "HEAD"],
+            capture_output=True, text=True
+        )
+        changed_files = diff_result.stdout.strip().split("\n") if diff_result.stdout.strip() else []
+
+        # Also include uncommitted changes
+        uncommitted_result = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--name-only", "HEAD"],
+            capture_output=True, text=True
+        )
+        uncommitted = uncommitted_result.stdout.strip().split("\n") if uncommitted_result.stdout.strip() else []
+
+        staged_result = subprocess.run(
+            ["git", "-C", worktree_path, "diff", "--cached", "--name-only"],
+            capture_output=True, text=True
+        )
+        staged = staged_result.stdout.strip().split("\n") if staged_result.stdout.strip() else []
+
+        # Also include untracked files (new files not yet staged)
+        untracked_result = subprocess.run(
+            ["git", "-C", worktree_path, "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True
+        )
+        untracked = untracked_result.stdout.strip().split("\n") if untracked_result.stdout.strip() else []
+
+        all_files = set(changed_files + uncommitted + staged + untracked)
+
+        # Extract plugin names (first path component)
+        modified_plugins = set()
+        for f in all_files:
+            if f and "/" in f:
+                plugin = f.split("/")[0]
+                if plugin.startswith("org.") or plugin.startswith("com."):
+                    modified_plugins.add(plugin)
+
+        # Find new plugins not yet in YAML
+        existing = existing_plugins[branch][repo]
+        new_for_repo = sorted(modified_plugins - existing)
+        if new_for_repo:
+            new_plugins[branch][repo] = new_for_repo
+            print(f"{repo}: found {len(new_for_repo)} new plugin(s): {', '.join(new_for_repo)}", file=sys.stderr)
+        else:
+            print(f"{repo}: no new plugins", file=sys.stderr)
+
+# Update YAML using shared helper
+if not any(new_plugins[b] for b in new_plugins):
+    print("No new plugins to add.", file=sys.stderr)
+    sys.exit(0)
+
+for branch in branches:
+    for repo, plugins in new_plugins[branch].items():
+        if not plugins:
+            continue
+        # Write plugins to temp file, call shared helper
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("\n".join(plugins) + "\n")
+            tmp_path = f.name
+        try:
+            subprocess.run(
+                [os.path.join(SCRIPT_DIR, "add-plugins-to-yaml"), yaml_file, branch, repo, tmp_path],
+                check=True
+            )
+        finally:
+            os.unlink(tmp_path)

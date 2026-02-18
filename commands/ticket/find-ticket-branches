@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# find-ticket-branches — find all repos with branches matching a ticket number
+#
+# Output: machine-parseable lines of  repo-name\tbranch-name
+# (one per line, no decorations, org prefix stripped)
+#
+# Usage: find-ticket-branches UIEXT-3141 [org]
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <ticket-number> [org]" >&2
+  echo "Example: $0 UIEXT-3141" >&2
+  exit 1
+fi
+
+ticket="$1"
+org="${2:-knime}"
+cutoff=$(date -v-1y +%Y-%m-%d)
+batch_size=25
+
+echo "Searching for branches containing '$ticket' in $org repos (active since $cutoff)..." >&2
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+# Get all active repo names
+repos=($(gh repo list "$org" --no-archived -L 1000 \
+  --json name,pushedAt \
+  --jq '[.[] | select(.pushedAt > "'"$cutoff"'")] | .[].name'))
+
+echo "Scanning ${#repos[@]} repos..." >&2
+
+# Build and execute GraphQL queries in parallel batches
+batch_num=0
+for (( i=0; i<${#repos[@]}; i+=batch_size )); do
+  batch=("${repos[@]:i:batch_size}")
+
+  # Build GraphQL query with aliased repos
+  query="{"
+  for j in "${!batch[@]}"; do
+    name="${batch[$j]}"
+    alias="r${j}"
+    query+=" $alias: repository(owner: \"$org\", name: \"$name\") { name refs(refPrefix: \"refs/heads/\", first: 100) { nodes { name } } }"
+  done
+  query+=" }"
+
+  (
+    gh api graphql -f query="$query" --jq '
+      .data | to_entries[] |
+      .value as $repo |
+      ($repo.refs.nodes // []) | map(select(.name | test("'"$ticket"'"))) |
+      if length > 0 then
+        map("\($repo.name)\t\(.name)") | join("\n")
+      else empty end
+    ' > "$tmpdir/batch_$batch_num" 2>/dev/null
+  ) &
+
+  batch_num=$((batch_num + 1))
+done
+
+wait
+
+cat "$tmpdir"/batch_* 2>/dev/null || true

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket plugins-delete — pick tracked plugins to remove from ticket YAML
+#
+# Usage: ticket plugins-delete  (fzf multi-select picker)
+# Must be run from inside a worktree of the active ticket.
+
+TICKETS_DIR="$HOME/.tickets"
+REPOS_DIR="$HOME/knime/repos"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE="$TICKETS_DIR/$ACTIVE_TICKET.yaml"
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+# Detect current repo + branch from PWD
+REPO=""
+BRANCH=""
+for repo_git in "$REPOS_DIR"/*.git; do
+  [ -d "$repo_git" ] || continue
+  repo_name=$(basename "$repo_git" .git)
+  if [[ "$PWD" == "$repo_git/branches/"* ]]; then
+    REPO="$repo_name"
+    branch_and_rest="${PWD#"$repo_git/branches/"}"
+    while IFS= read -r yaml_branch; do
+      if [[ "$branch_and_rest" == "$yaml_branch"* ]]; then
+        BRANCH="$yaml_branch"
+        break
+      fi
+    done < <(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/://;s/^[[:space:]]*//')
+    break
+  fi
+done
+
+if [ -z "$REPO" ]; then
+  echo "Error: Not inside a ticket worktree. cd to a repo worktree first." >&2
+  exit 1
+fi
+
+if [ -z "$BRANCH" ]; then
+  BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+fi
+
+# Get tracked plugins via shared helper
+EXISTING=$("$SCRIPT_DIR/parse-ticket-plugins" "$YAML_FILE" "$BRANCH" "$REPO")
+
+if [ -z "$EXISTING" ]; then
+  echo "No plugins tracked for $REPO." >&2
+  exit 0
+fi
+
+# fzf multi-select
+SELECTED=$(echo "$EXISTING" | fzf --prompt="Remove plugins ($REPO)> " --height=~20 --reverse --multi)
+if [ -z "$SELECTED" ]; then
+  echo "Aborted." >&2
+  exit 1
+fi
+
+# Remove from YAML via shared helper
+PLUGIN_FILE=$(mktemp)
+echo "$SELECTED" > "$PLUGIN_FILE"
+trap 'rm -f "$PLUGIN_FILE"' EXIT
+
+"$SCRIPT_DIR/remove-plugins-from-yaml" "$YAML_FILE" "$BRANCH" "$REPO" "$PLUGIN_FILE"
