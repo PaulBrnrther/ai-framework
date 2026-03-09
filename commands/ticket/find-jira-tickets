@@ -15,14 +15,46 @@ if [ -z "${KNIME_ATLASSIAN_EMAIL:-}" ] || [ -z "${KNIME_ATLASSIAN_API_TOKEN:-}" 
   exit 1
 fi
 
-echo "Fetching assigned tickets from Jira..." >&2
+# Parse optional --all-project <PROJECT> flag
+ALL_PROJECT=""
+if [ "${1:-}" = "--all-project" ]; then
+  ALL_PROJECT="${2:?--all-project requires a project key}"
+  shift 2
+fi
 
-JQL='assignee = currentUser() AND status NOT IN (Done, Closed) ORDER BY updated DESC'
+# Parse optional --search <text> flag
+SEARCH_TEXT=""
+if [ "${1:-}" = "--search" ]; then
+  SEARCH_TEXT="${2:-}"
+  shift 2
+fi
+
+# Parse optional -b flag (backlog only)
+BACKLOG_ONLY=0
+if [ "${1:-}" = "-b" ]; then
+  BACKLOG_ONLY=1
+  shift
+fi
+
+if [ -n "$ALL_PROJECT" ]; then
+  echo "Fetching all non-closed ${ALL_PROJECT} tickets from Jira..." >&2
+  JQL="project = ${ALL_PROJECT} AND status NOT IN (Done, Closed)"
+else
+  echo "Fetching assigned tickets from Jira..." >&2
+  JQL="assignee = currentUser() AND status NOT IN (Done, Closed)"
+fi
+if [ "$BACKLOG_ONLY" = "1" ]; then
+  JQL="$JQL AND status = \"In Backlog\""
+fi
+if [ -n "$SEARCH_TEXT" ]; then
+  JQL="$JQL AND text ~ \"${SEARCH_TEXT}\""
+fi
+JQL="$JQL ORDER BY updated DESC"
 ENCODED_JQL=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")
 
 RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
   -H "Accept: application/json" \
-  "${JIRA_BASE}/rest/api/3/search/jql?jql=${ENCODED_JQL}&fields=summary,status,issuetype&maxResults=50")
+  "${JIRA_BASE}/rest/api/3/search/jql?jql=${ENCODED_JQL}&fields=summary,status,issuetype&maxResults=100")
 
 # Check for errors
 if echo "$RESPONSE" | jq -e '.errorMessages' >/dev/null 2>&1; then

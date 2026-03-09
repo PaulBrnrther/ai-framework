@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-open — open URL(s) in a named Chrome tab group via the tab-manager FIFO.
+#
+# Usage:
+#   tab-open <group-name> <color> <url> [url2 ...]
+#
+# Colors: grey blue red yellow green pink purple cyan orange
+#
+# If the FIFO is not available or Chrome is not running, falls back to
+# opening URLs in the default browser.
+
+FIFO="$HOME/.tab-manager.fifo"
+TIMEOUT=3  # seconds to wait for FIFO write before falling back
+
+if [ $# -lt 3 ]; then
+  echo "Usage: tab-open <group> <color> <url> [url2 ...]" >&2
+  exit 1
+fi
+
+GROUP="$1"
+COLOR="$2"
+shift 2
+URLS=("$@")
+
+if [ ! -p "$FIFO" ]; then
+  echo "Tab manager FIFO not found — opening in default browser." >&2
+  for url in "${URLS[@]}"; do
+    open "$url"
+  done
+  exit 0
+fi
+
+# Build JSON lines (all in one write to avoid FIFO reader race)
+PAYLOAD=""
+for url in "${URLS[@]}"; do
+  escaped_url="${url//\"/\\\"}"
+  escaped_group="${GROUP//\"/\\\"}"
+  escaped_color="${COLOR//\"/\\\"}"
+  PAYLOAD+=$(printf '{"url":"%s","group":"%s","color":"%s"}\n' "$escaped_url" "$escaped_group" "$escaped_color")
+done
+
+if timeout "${TIMEOUT}s" bash -c "printf '%s' \"\$1\" > \"\$2\"" _ "$PAYLOAD" "$FIFO" 2>/dev/null; then
+  open -a "Google Chrome"
+  exit 0
+else
+  echo "Tab manager timeout — opening in default browser." >&2
+  for url in "${URLS[@]}"; do
+    open "$url"
+  done
+fi

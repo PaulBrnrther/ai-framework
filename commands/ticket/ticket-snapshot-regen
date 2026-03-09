@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket snapshot-regen — prepare org.knime.core.ui.testing for snapshot regeneration.
+#
+# Hardcoded for knime-core-ui repo. Idempotent — only acts if not yet set up:
+# 1. If knime-core-ui is not in the ticket repos → trigger ta knime-core-ui
+# 2. If org.knime.core.ui.testing is not in plugins → apply snapshot regen changes + add it
+# 3. Already set up → nothing to do
+
+TICKETS_DIR="$HOME/.tickets"
+REPOS_DIR="$HOME/knime/repos"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="knime-core-ui"
+TESTING_PLUGIN="org.knime.core.ui.testing"
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE="$TICKETS_DIR/$ACTIVE_TICKET.yaml"
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | head -1 | sed 's/://;s/^[[:space:]]*//')
+if [ -z "$BRANCH" ]; then
+  echo "Error: No branch found in $YAML_FILE" >&2
+  exit 1
+fi
+
+# Step 1: ensure knime-core-ui is in the ticket repos
+REPOS=$("$SCRIPT_DIR/parse-ticket-repos" "$YAML_FILE" "$BRANCH")
+if ! echo "$REPOS" | grep -qx "$REPO" 2>/dev/null; then
+  echo "knime-core-ui not in ticket repos — adding..." >&2
+  echo "_ticket_impl add-repo $REPO"
+  exit 0
+fi
+
+# Step 2: check if testing plugin is already tracked
+EXISTING=$("$SCRIPT_DIR/parse-ticket-plugins" "$YAML_FILE" "$BRANCH" "$REPO")
+if echo "$EXISTING" | grep -qx "$TESTING_PLUGIN" 2>/dev/null; then
+  echo "$TESTING_PLUGIN already in ticket — nothing to do." >&2
+  exit 0
+fi
+
+WORKTREE_PATH="$REPOS_DIR/$REPO.git/branches/$BRANCH"
+TESTING_DIR="$WORKTREE_PATH/$TESTING_PLUGIN"
+
+if [ ! -d "$TESTING_DIR" ]; then
+  echo "Error: Testing plugin directory not found: $TESTING_DIR" >&2
+  exit 1
+fi
+
+echo "Setting up $TESTING_PLUGIN for $ACTIVE_TICKET..." >&2
+
+# Apply snapshot regeneration changes to *SnapshotTest.java
+SNAPSHOT_TEST=$(find "$TESTING_DIR" -name "*SnapshotTest.java" | head -1)
+if [ -z "$SNAPSHOT_TEST" ]; then
+  echo "Warning: No *SnapshotTest.java found in $TESTING_PLUGIN — skipping file changes." >&2
+elif grep -q '&& false' "$SNAPSHOT_TEST"; then
+  echo "Snapshot regen mode already active in $(basename "$SNAPSHOT_TEST")." >&2
+else
+  python3 - "$SNAPSHOT_TEST" <<'PYEOF'
+import sys, re
+
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+
+content = content.replace(
+    'if (Files.exists(snapshotFile)) {',
+    'if (Files.exists(snapshotFile) && false) {'
+)
+
+content = re.sub(
+    r'( +)(snapshot\.writeGroundTruth\(snapshotFile\);)',
+    r'\1Files.deleteIfExists(snapshotFile);\n\1\2',
+    content
+)
+
+with open(path, 'w') as f:
+    f.write(content)
+
+print(f"Applied snapshot regen changes to {path}", file=sys.stderr)
+PYEOF
+fi
+
+# Add testing plugin to ticket YAML
+PLUGIN_FILE=$(mktemp)
+echo "$TESTING_PLUGIN" > "$PLUGIN_FILE"
+trap 'rm -f "$PLUGIN_FILE"' EXIT
+"$SCRIPT_DIR/add-plugins-to-yaml" "$YAML_FILE" "$BRANCH" "$REPO" "$PLUGIN_FILE"
+
+# If Eclipse is running, offer to run te (sync-plugins + fetch-jars + workingset)
+ECLIPSE_APP="$HOME/eclipse/rcp-2024-12/Eclipse.app"
+if pgrep -f "$ECLIPSE_APP/Contents/MacOS/eclipse" > /dev/null 2>&1; then
+  echo -n "Eclipse is running. Run 'te' now? [y/N] " >&2
+  read -r answer </dev/tty
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    echo "_ticket_impl eclipse"
+  fi
+fi

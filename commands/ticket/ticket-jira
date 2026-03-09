@@ -10,13 +10,39 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
 EVAL_FILE="${TICKET_EVAL_FILE:-}"
 
-# Write JIRA.md with description + steps to reproduce
+BACKLOG_ONLY_FLAG=""
+JIRA_UPDATE_ONLY=0
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    -b)
+      BACKLOG_ONLY_FLAG="-b"
+      shift
+      ;;
+    -u|--update-files)
+      JIRA_UPDATE_ONLY=1
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$JIRA_UPDATE_ONLY" = "1" ] && [ $# -eq 0 ]; then
+  if [ -n "${ACTIVE_TICKET:-}" ]; then
+    set -- "$ACTIVE_TICKET"
+  else
+    echo "Error: no ticket provided and no ACTIVE_TICKET set." >&2
+    exit 1
+  fi
+fi
+
+# Write JIRA.md with description + steps to reproduce + related ticket links.
+# Also writes parent-ticket/<KEY>.md and sibling-tickets/<KEY>.md when applicable.
 # Args: $1=target_dir, $2=title (summary to use)
 write_jira_md() {
   local dir="$1" title="$2"
-  if [ -z "$TICKET_DESCRIPTION" ] && [ -z "$TICKET_STEPS_TO_REPRODUCE" ]; then
-    return
-  fi
+  mkdir -p "$dir"
   {
     echo "# ${TICKET}: ${title}"
     if [ -n "$TICKET_DESCRIPTION" ]; then
@@ -31,20 +57,117 @@ write_jira_md() {
       echo ""
       echo "$TICKET_STEPS_TO_REPRODUCE"
     fi
+    if [ -n "${TICKET_PARENT_KEY:-}" ]; then
+      echo ""
+      echo "## Related"
+      echo ""
+      echo "**Parent:** [${TICKET_PARENT_KEY}: ${TICKET_PARENT_SUMMARY}](parent-ticket/${TICKET_PARENT_KEY}.md)"
+      if [ -n "${TICKET_SIBLINGS:-}" ]; then
+        echo ""
+        echo "**Siblings:**"
+        while IFS=$'\t' read -r sib_key sib_summary; do
+          echo "- [${sib_key}: ${sib_summary}](sibling-tickets/${sib_key}.md)"
+        done <<< "$TICKET_SIBLINGS"
+      fi
+    fi
   } > "$dir/JIRA.md"
+
+  # Keep related files fresh (remove stale parent/sibling docs from previous runs).
+  rm -rf "$dir/parent-ticket" "$dir/sibling-tickets"
+
+  # Write parent ticket file
+  if [ -n "${TICKET_PARENT_KEY:-}" ]; then
+    mkdir -p "$dir/parent-ticket"
+    {
+      echo "# ${TICKET_PARENT_KEY}: ${TICKET_PARENT_SUMMARY}"
+      if [ -n "${TICKET_PARENT_DESCRIPTION:-}" ]; then
+        echo ""
+        echo "$TICKET_PARENT_DESCRIPTION"
+      fi
+    } > "$dir/parent-ticket/${TICKET_PARENT_KEY}.md"
+
+    # Write sibling ticket files (with description when available)
+    if [ -n "${TICKET_SIBLINGS:-}" ]; then
+      mkdir -p "$dir/sibling-tickets"
+      while IFS=$'\t' read -r sib_key sib_summary; do
+        {
+          echo "# ${sib_key}: ${sib_summary}"
+          local sib_desc=""
+          [ -f "${SIBLING_DESC_DIR:-}/$sib_key" ] && sib_desc=$(< "${SIBLING_DESC_DIR}/$sib_key")
+          if [ -n "$sib_desc" ]; then
+            echo ""
+            echo "$sib_desc"
+          fi
+        } > "$dir/sibling-tickets/${sib_key}.md"
+      done <<< "$TICKET_SIBLINGS"
+    fi
+  fi
+}
+
+fetch_jira_context() {
+  TICKET_DESCRIPTION=""
+  TICKET_SUMMARY_JIRA=""
+  TICKET_STEPS_TO_REPRODUCE=""
+  TICKET_PARENT_KEY=""
+  TICKET_PARENT_SUMMARY=""
+  TICKET_PARENT_DESCRIPTION=""
+  TICKET_SIBLINGS=""
+
+  if [ -z "${KNIME_ATLASSIAN_EMAIL:-}" ] || [ -z "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
+    return 1
+  fi
+
+  JIRA_DESC_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+    -H "Accept: application/json" \
+    "https://knime-com.atlassian.net/rest/api/2/issue/${TICKET}?fields=description,summary,customfield_11444,issuetype,parent")
+  TICKET_DESCRIPTION=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.description // ""')
+  TICKET_SUMMARY_JIRA=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.summary // ""')
+  TICKET_STEPS_TO_REPRODUCE=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.customfield_11444 // ""')
+  TICKET_PARENT_KEY=$(echo "$JIRA_DESC_RESPONSE" | jq -r 'if .fields.issuetype.subtask then .fields.parent.key // "" else "" end')
+  TICKET_PARENT_SUMMARY=$(echo "$JIRA_DESC_RESPONSE" | jq -r 'if .fields.issuetype.subtask then .fields.parent.fields.summary // "" else "" end')
+
+  if [ -n "$TICKET_PARENT_KEY" ]; then
+    PARENT_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+      -H "Accept: application/json" \
+      "https://knime-com.atlassian.net/rest/api/2/issue/${TICKET_PARENT_KEY}?fields=description,subtasks")
+    TICKET_PARENT_DESCRIPTION=$(echo "$PARENT_RESPONSE" | jq -r '.fields.description // ""')
+    TICKET_SIBLINGS=$(echo "$PARENT_RESPONSE" | jq -r ".fields.subtasks[]? | select(.key != \"$TICKET\") | .key + \"\t\" + .fields.summary")
+    if [ -n "$TICKET_SIBLINGS" ]; then
+      while IFS=$'\t' read -r sib_key _; do
+        SIB_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+          -H "Accept: application/json" \
+          "https://knime-com.atlassian.net/rest/api/2/issue/${sib_key}?fields=description")
+        echo "$SIB_RESPONSE" | jq -r '.fields.description // ""' > "$SIBLING_DESC_DIR/$sib_key"
+      done <<< "$TICKET_SIBLINGS"
+    fi
+  fi
 }
 
 if [ $# -eq 0 ]; then
   # No-arg mode: fzf picker from Jira assigned tickets
   require_eval_file
 
-  RESULTS=$("$TICKET_LIB_DIR/find-jira-tickets")
+  if [ "${TICKET_ALL_JIRA:-0}" = "1" ]; then
+    RESULTS=$("$TICKET_LIB_DIR/find-jira-tickets" --all-project UIEXT $BACKLOG_ONLY_FLAG)
+  else
+    RESULTS=$("$TICKET_LIB_DIR/find-jira-tickets" $BACKLOG_ONLY_FLAG)
+  fi
   if [ -z "$RESULTS" ]; then
     echo "No assigned tickets found." >&2
     exit 1
   fi
 
-  CHOICE=$(echo "$RESULTS" | fzf --prompt="Jira ticket> " --height=~20 --reverse --no-sort --delimiter=$'\t' --with-nth=1,2,3)
+  if [ "${TICKET_ALL_JIRA:-0}" = "1" ]; then
+    RELOAD_CMD="$TICKET_LIB_DIR/find-jira-tickets --all-project UIEXT $BACKLOG_ONLY_FLAG --search {q} 2>/dev/null || true"
+  else
+    RELOAD_CMD="$TICKET_LIB_DIR/find-jira-tickets $BACKLOG_ONLY_FLAG --search {q} 2>/dev/null || true"
+  fi
+
+  CHOICE=$(echo "$RESULTS" | fzf \
+    --prompt="Jira ticket> " --height=~20 --reverse --no-sort \
+    --delimiter=$'\t' --with-nth=1,2,3 \
+    --disabled \
+    --bind "change:reload($RELOAD_CMD)")
   if [ -z "$CHOICE" ]; then
     echo "Aborted." >&2
     exit 1
@@ -73,33 +196,57 @@ if [[ ! "$TICKET" =~ ^[A-Z]+-[0-9]+$ ]]; then
   exit 1
 fi
 
+YAML_FILE=$(ticket_yaml_file "$TICKET")
+
+SIBLING_DESC_DIR=$(mktemp -d)
+trap 'rm -rf "$SIBLING_DESC_DIR"' EXIT
+
+if [ "$JIRA_UPDATE_ONLY" = "1" ]; then
+  if ! fetch_jira_context; then
+    echo "Error: KNIME_ATLASSIAN_EMAIL and KNIME_ATLASSIAN_API_TOKEN are required for jira update." >&2
+    exit 1
+  fi
+  if [ ! -f "$YAML_FILE" ]; then
+    echo "Error: no local ticket YAML found at $YAML_FILE" >&2
+    exit 1
+  fi
+  BRANCH=$(grep -E '^\s{2}([a-z]+/)?[A-Z]+-[0-9]+-' "$YAML_FILE" | sed 's/:.*$//;s/^[[:space:]]*//' | head -1)
+  if [ -z "$BRANCH" ]; then
+    echo "Error: couldn't determine branch from $YAML_FILE" >&2
+    exit 1
+  fi
+  TICKET_DIR=$(ticket_dir "$BRANCH")
+  TICKET_NAME=$(grep '^name:' "$YAML_FILE" | sed 's/^name:[[:space:]]*//;s/^"//;s/"$//')
+  write_jira_md "$TICKET_DIR" "${TICKET_SUMMARY_JIRA:-${TICKET_NAME:-$TICKET}}"
+  echo "Updated Jira files for $TICKET in $TICKET_DIR." >&2
+  echo "export ACTIVE_TICKET=$TICKET"
+  echo "cd '$TICKET_DIR'"
+  exit 0
+fi
+
 if [ -f "$TICKETS_DIR/$TICKET.yaml" ] && [ "${TICKET_CONFIRMED:-0}" != "1" ]; then
   echo "$TICKET already exists locally. Press enter to re-sync from GitHub, or ctrl-c to abort." >&2
   read -r </dev/tty
 fi
 
-# Ask whether to search GitHub for existing branches
-echo -n "Search GitHub for existing branches? [Y/n] " >&2
-read -rsn1 search_choice </dev/tty
-echo >&2
 RESULTS=""
-if [[ ! "$search_choice" =~ ^[Nn]$ ]]; then
+if [ "${TICKET_CONFIRMED:-0}" = "1" ] && [ "${TICKET_FORCE_SYNC:-0}" = "1" ]; then
+  # tjf: skip prompt, go straight to GitHub
   echo "Looking up branches for $TICKET on GitHub..." >&2
   RESULTS=$("$TICKET_LIB_DIR/find-ticket-branches" "$TICKET")
+else
+  # Ask whether to search GitHub for existing branches
+  echo -n "Search GitHub for existing branches? [Y/n] " >&2
+  read -rsn1 search_choice </dev/tty
+  echo >&2
+  if [[ ! "$search_choice" =~ ^[Nn]$ ]]; then
+    echo "Looking up branches for $TICKET on GitHub..." >&2
+    RESULTS=$("$TICKET_LIB_DIR/find-ticket-branches" "$TICKET")
+  fi
 fi
 
 # Fetch ticket description from Jira (for JIRA.md in ticket dir)
-TICKET_DESCRIPTION=""
-TICKET_SUMMARY_JIRA=""
-TICKET_STEPS_TO_REPRODUCE=""
-if [ -n "${KNIME_ATLASSIAN_EMAIL:-}" ] && [ -n "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
-  JIRA_DESC_RESPONSE=$(curl -s -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
-    -H "Accept: application/json" \
-    "https://knime-com.atlassian.net/rest/api/2/issue/${TICKET}?fields=description,summary,customfield_11444")
-  TICKET_DESCRIPTION=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.description // ""')
-  TICKET_SUMMARY_JIRA=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.summary // ""')
-  TICKET_STEPS_TO_REPRODUCE=$(echo "$JIRA_DESC_RESPONSE" | jq -r '.fields.customfield_11444 // ""')
-fi
+fetch_jira_context || true
 
 if [ -z "$RESULTS" ]; then
   # No branches found — help user create a branch name
@@ -147,7 +294,7 @@ if [ -z "$RESULTS" ]; then
   fi
 
   # Instant slug from bash, AI improvement on tab
-  SLUG=$(echo "$SUMMARY" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-60)
+  SLUG=$(echo "$SUMMARY" | command tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-60)
   SLUG_SOURCE="fallback"
   BRANCH="${PREFIX}/${TICKET}-${SLUG}"
 
@@ -190,7 +337,7 @@ if [ -z "$RESULTS" ]; then
         wait $PID_COPILOT 2>/dev/null || true
         rm -rf "$SLUG_DIR"
 
-        NEW_SLUG=$(echo "$RAW_SLUG" | tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
         if [ -n "$NEW_SLUG" ]; then
           SLUG="$NEW_SLUG"
           BRANCH="${PREFIX}/${TICKET}-${SLUG}"
@@ -205,7 +352,7 @@ if [ -z "$RESULTS" ]; then
         read -r REFINEMENT </dev/tty
         echo "Refining..." >&2
         RAW_SLUG=$(claude -p --model haiku --effort low "Current branch slug: ${SLUG}. Original title: ${SUMMARY}. User wants: ${REFINEMENT}. Output ONLY the improved kebab-case slug (about 5 lowercase words, hyphens, nothing else)." 2>/dev/null || true)
-        NEW_SLUG=$(echo "$RAW_SLUG" | tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
         if [ -n "$NEW_SLUG" ]; then
           SLUG="$NEW_SLUG"
           BRANCH="${PREFIX}/${TICKET}-${SLUG}"
@@ -223,14 +370,7 @@ if [ -z "$RESULTS" ]; then
   # Create ticket YAML with no repos yet
   mkdir -p "$TICKETS_DIR"
   YAML_FILE=$(ticket_yaml_file "$TICKET")
-
-  cat > "$YAML_FILE" <<YAML
-ticket: $TICKET
-name: "$SUMMARY"
-branches:
-  $BRANCH:
-    repos: {}
-YAML
+  create_ticket_yaml "$YAML_FILE" "$TICKET" "$SUMMARY" "$BRANCH"
   echo "Created ticket $TICKET" >&2
 
   # Set active ticket + update MRU
@@ -280,7 +420,7 @@ elif [ ${#UNIQUE_BRANCHES[@]} -gt 1 ]; then
     done
     echo "    $b (${repos_for_branch[*]})" >&2
   done
-  BRANCH=$(printf '%s\n' "${UNIQUE_BRANCHES[@]}" | fzf --prompt="Pick branch> " --height=~10 --reverse </dev/tty)
+  BRANCH=$(printf '%s\n' "${UNIQUE_BRANCHES[@]}" | fzf --prompt="Pick branch> " --height=~10 --reverse)
   if [ -z "$BRANCH" ]; then
     echo "Aborted." >&2
     exit 1
@@ -301,8 +441,6 @@ done
 
 # Create or update ticket YAML
 mkdir -p "$TICKETS_DIR"
-YAML_FILE=$(ticket_yaml_file "$TICKET")
-
 if [ -f "$YAML_FILE" ]; then
   echo "Ticket $TICKET already exists — adding newly found repos..." >&2
   for repo in "${SELECTED_REPOS[@]}"; do
@@ -312,27 +450,12 @@ else
   # Derive human-readable name from branch slug
   if [[ "$BRANCH" =~ ^([a-z]+/)?[A-Z]+-[0-9]+-(.+)$ ]]; then
     SLUG="${BASH_REMATCH[2]}"
-    NAME=$(echo "$SLUG" | tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+    NAME=$(echo "$SLUG" | command tr '-' ' ' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
   else
     NAME="$TICKET"
   fi
 
-  # Build repos block
-  REPOS_BLOCK=""
-  for repo in "${SELECTED_REPOS[@]}"; do
-    REPOS_BLOCK+="      ${repo}:
-        plugins: []
-"
-  done
-
-  cat > "$YAML_FILE" <<EOF
-ticket: $TICKET
-name: "$NAME"
-branches:
-  $BRANCH:
-    repos:
-$REPOS_BLOCK
-EOF
+  create_ticket_yaml "$YAML_FILE" "$TICKET" "$NAME" "$BRANCH" "${SELECTED_REPOS[@]}"
   echo "Created ticket $TICKET" >&2
 fi
 
@@ -349,7 +472,7 @@ set_active_ticket "$TICKET"
 TICKET_DIR=$(ticket_dir "$BRANCH")
 
 # Write Jira description to separate file (tc will merge into CLAUDE.md)
-write_jira_md "$TICKET_DIR" "$TICKET_SUMMARY_JIRA"
+write_jira_md "$TICKET_DIR" "${TICKET_SUMMARY_JIRA:-$TICKET}"
 
 echo "Ticket $TICKET ready." >&2
 

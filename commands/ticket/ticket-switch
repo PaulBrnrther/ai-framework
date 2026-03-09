@@ -52,21 +52,26 @@ elif [ ${#TICKETS[@]} -eq 1 ]; then
   SELECTED="${TICKETS[0]}"
   echo "Only one ticket: $SELECTED (${NAMES[0]})" >&2
 else
+  RESET=$(printf '\033[0m')
   OPTIONS=()
   for i in "${!TICKETS[@]}"; do
     marker="  "
     if [ "${TICKETS[$i]}" = "${ACTIVE_TICKET:-}" ]; then
       marker="* "
     fi
-    OPTIONS+=("${marker}${TICKETS[$i]}  ${NAMES[$i]}")
+    ticket="${TICKETS[$i]}"
+    color=$(grep -E '^color:' "$TICKETS_DIR/$ticket.yaml" 2>/dev/null | head -1 | sed 's/^color:[[:space:]]*//;s/"//g')
+    ansi=$(ticket_ansi_color "$color")
+    display="${marker}${ansi}${ticket}${RESET}  ${NAMES[$i]}"
+    OPTIONS+=("${ticket}	${display}")
   done
 
-  CHOICE=$(printf '%s\n' "${OPTIONS[@]}" | fzf --prompt="Switch ticket> " --height=~10 --reverse --no-sort)
+  CHOICE=$(printf '%s\n' "${OPTIONS[@]}" | fzf --ansi --delimiter=$'\t' --with-nth=2 --prompt="Switch ticket> " --height=~10 --reverse --no-sort)
   if [ -z "$CHOICE" ]; then
     echo "Aborted." >&2
     exit 1
   fi
-  SELECTED=$(echo "$CHOICE" | sed 's/^[* ]*//' | awk '{print $1}')
+  SELECTED=$(echo "$CHOICE" | cut -f1)
 fi
 
 # Find a worktree to cd into: check if we're in a repo that has a worktree for this ticket

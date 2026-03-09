@@ -53,6 +53,109 @@ require_eval_file() {
   fi
 }
 
+# ticket_ansi_color <chrome-color-name>
+#   Returns an ANSI escape code for the given Chrome tab group color name.
+#   Outputs the reset code for unknown/missing colors.
+ticket_ansi_color() {
+  case "${1:-}" in
+    blue)   printf '\033[94m' ;;
+    red)    printf '\033[91m' ;;
+    yellow) printf '\033[93m' ;;
+    green)  printf '\033[92m' ;;
+    pink)   printf '\033[95m' ;;
+    purple) printf '\033[95m' ;;
+    cyan)   printf '\033[96m' ;;
+    orange) printf '\033[33m' ;;
+    *)      printf '\033[0m'  ;;
+  esac
+}
+
+# ticket_tab_color <ticket>
+#   Returns the color for the ticket. New tickets store their color in the ticket YAML.
+#   Falls back to ~/.tickets/.color-assignments for legacy tickets that predate YAML color support.
+ticket_tab_color() {
+  local ticket="$1"
+  local yaml_file
+  yaml_file=$(ticket_yaml_file "$ticket")
+
+  # Check YAML first (new tickets have color stored there)
+  if [ -f "$yaml_file" ]; then
+    local yaml_color
+    yaml_color=$(grep -E '^color:' "$yaml_file" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"' || true)
+    if [ -n "$yaml_color" ]; then
+      echo "$yaml_color"
+      return
+    fi
+  fi
+
+  # Fall back to .color-assignments for legacy tickets
+  local colors=(blue red yellow green pink purple cyan orange)
+  local assignments_file="$TICKETS_DIR/.color-assignments"
+
+  if [ -f "$assignments_file" ]; then
+    local existing
+    existing=$(grep "^${ticket}=" "$assignments_file" 2>/dev/null | cut -d= -f2 || true)
+    if [ -n "$existing" ]; then
+      echo "$existing"
+      return
+    fi
+  fi
+
+  # Count existing assignments to get next index
+  local count=0
+  if [ -f "$assignments_file" ]; then
+    count=$(grep -c '=' "$assignments_file" 2>/dev/null || true)
+  fi
+
+  local color="${colors[$(( count % 8 ))]}"
+  mkdir -p "$TICKETS_DIR"
+  echo "${ticket}=${color}" >> "$assignments_file"
+  echo "$color"
+}
+
+# create_ticket_yaml <yaml_file> <ticket> <name> <branch> [<repo>...]
+#   Creates a ticket YAML with color assigned. Repos are optional.
+create_ticket_yaml() {
+  local yaml_file="$1" ticket="$2" name="$3" branch="$4"
+  shift 4
+  local repos=("$@")
+
+  local color
+  color=$(ticket_tab_color "$ticket")
+
+  local repos_block
+  if [ ${#repos[@]} -eq 0 ]; then
+    repos_block="    repos: {}"
+  else
+    repos_block="    repos:"
+    for repo in "${repos[@]}"; do
+      repos_block+="
+      ${repo}:
+        plugins: []"
+    done
+  fi
+
+  mkdir -p "$(dirname "$yaml_file")"
+  cat > "$yaml_file" <<EOF
+ticket: $ticket
+name: "$name"
+color: $color
+branches:
+  $branch:
+$repos_block
+EOF
+}
+
+# ticket_tab_group <ticket> <yaml_file>
+#   Echoes the tab group name: "<TICKET> <human name from YAML>"
+ticket_tab_group() {
+  local ticket="$1"
+  local yaml_file="$2"
+  local name
+  name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//' | sed 's/^"//;s/"$//')
+  echo "$ticket $name"
+}
+
 # ensure_bare_repo <repo>
 #   Clones bare repo if it doesn't exist, fixes fetch refspec, copies shared hooks.
 ensure_bare_repo() {
