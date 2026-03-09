@@ -64,7 +64,7 @@ _ticket_impl() {
     jira)
       shift
       script="$SCRIPT_DIR/ticket-jira"
-      if [ $# -eq 0 ]; then
+      if [ $# -eq 0 ] || [[ "${1:-}" == -* ]]; then
         uses_fzf=true
       fi
       ;;
@@ -76,6 +76,10 @@ _ticket_impl() {
       shift
       script="$SCRIPT_DIR/ticket-pr"
       uses_fzf=true
+      ;;
+    snapshot-regen)
+      shift
+      script="$SCRIPT_DIR/ticket-snapshot-regen"
       ;;
     pull)
       shift
@@ -164,6 +168,28 @@ alias tpd='ticket plugins-delete'
 alias trd='ticket repo-delete'
 alias tj='ticket jira'
 alias Tj='Ticket jira'
+tJ() { TICKET_ALL_JIRA=1 ticket jira "$@"; }
+TJ() { TICKET_ALL_JIRA=1 Ticket jira "$@"; }
+tJb() { TICKET_ALL_JIRA=1 ticket jira -b "$@"; }
+TJb() { TICKET_ALL_JIRA=1 Ticket jira -b "$@"; }
+tjf() {
+  if [ -z "${ACTIVE_TICKET:-}" ]; then
+    echo "Error: no active ticket" >&2
+    return 1
+  fi
+  TICKET_CONFIRMED=1 TICKET_FORCE_SYNC=1 ticket jira "$ACTIVE_TICKET" "$@"
+}
+tju() {
+  local ticket="${1:-${ACTIVE_TICKET:-}}"
+  if [ -z "$ticket" ]; then
+    echo "Error: no active ticket (or pass one, e.g. tju UIEXT-1234)" >&2
+    return 1
+  fi
+  if [ $# -gt 0 ]; then
+    shift
+  fi
+  TICKET_CONFIRMED=1 ticket jira --update-files "$ticket" "$@"
+}
 
 # TST — show status for ALL tickets
 TST() {
@@ -177,22 +203,92 @@ TST() {
   done
   ACTIVE_TICKET="$orig_ticket"
 }
+alias cl='/Users/paulbaernreuther/ai/framework/commands/ticket/tab-clear'
+alias tsnap='ticket snapshot-regen'
 alias tpU='ticket pull'
 alias tpr='ticket pr'
+alias j='/Users/paulbaernreuther/ai/framework/commands/ticket/ticket-open-jira'
 
-# Ticket-aware Claude launcher
-# Uses $ACTIVE_TICKET (per-terminal), launches claude from the ticket's notes dir
-# with --add-dir for all worktrees. Falls back to plain claude if no active ticket.
+# jj / jJ — browse Jira tickets NOT yet checked out locally, open in browser (no tab group)
+# jj: tickets assigned to me
+# jJ: all UIEXT tickets (lazy search like tJ)
+_jira_browser() {
+  local mode="${1:-assigned}"
+  local script_dir="/Users/paulbaernreuther/ai/framework/commands/ticket"
+  local jira_base="https://knime-com.atlassian.net/browse"
+  local find_cmd prompt
+
+  if [ "$mode" = "all" ]; then
+    find_cmd="$script_dir/find-jira-tickets --all-project UIEXT"
+    prompt="Jira UIEXT (new)> "
+  else
+    find_cmd="$script_dir/find-jira-tickets"
+    prompt="Jira (new)> "
+  fi
+
+  # Build exclusion file: one ticket key per line for tickets already checked out
+  local excl_file
+  excl_file=$(mktemp)
+  find "$HOME/.tickets" -maxdepth 1 -name "*.yaml" 2>/dev/null \
+    | sed 's|.*/||;s|\.yaml$||' > "$excl_file"
+
+  local results
+  results=$($find_cmd 2>/dev/null | grep -vF -f "$excl_file" || true)
+
+  if [ -z "$results" ]; then
+    echo "No new tickets found (all already checked out locally)." >&2
+    rm -f "$excl_file"
+    return 1
+  fi
+
+  local reload_cmd="$find_cmd --search {q} 2>/dev/null | grep -vF -f '$excl_file' || true"
+
+  local choice
+  choice=$(echo "$results" | fzf \
+    --prompt="$prompt" --height=~20 --reverse --no-sort \
+    --delimiter=$'\t' --with-nth=1,2,3 \
+    --disabled \
+    --bind "change:reload($reload_cmd)")
+
+  rm -f "$excl_file"
+  [ -z "$choice" ] && return 0
+
+  local ticket
+  ticket=$(echo "$choice" | cut -f1)
+  open "$jira_base/$ticket"
+}
+
+jj() { _jira_browser assigned; }
+jJ() { _jira_browser all; }
+
+# Ticket-aware Claude/Copilot launcher
+# Uses $ACTIVE_TICKET (per-terminal), launches claude (or copilot with --copilot flag)
+# from the ticket's notes dir with relevant worktrees. Falls back to plain launcher if no active ticket.
 tc() {
+  # Check for --copilot flag
+  local use_copilot=false
+  local filtered_args=()
+  for arg in "$@"; do
+    if [ "$arg" = "--copilot" ]; then
+      use_copilot=true
+    else
+      filtered_args+=("$arg")
+    fi
+  done
+  set -- "${filtered_args[@]}"
+
+  local launcher="claude"
+  $use_copilot && launcher="copilot"
+
   if [ -z "${ACTIVE_TICKET:-}" ]; then
-    claude "$@"
+    "$launcher" "$@"
     return
   fi
 
   local SCRIPT_DIR="/Users/paulbaernreuther/ai/framework/commands/ticket"
   local yaml="$HOME/.tickets/$ACTIVE_TICKET.yaml"
   if [ ! -f "$yaml" ]; then
-    claude "$@"
+    "$launcher" "$@"
     return
   fi
 
@@ -210,18 +306,57 @@ tc() {
   # Ensure notes dir exists (used as main workspace)
   mkdir -p "$ticket_dir"
 
-  # Write project-level settings with only ticket worktrees
-  # (overrides global additionalDirectories so ~/knime/repos isn't included)
-  mkdir -p "$ticket_dir/.claude"
-  local dirs_json="["
-  local first=true
-  for d in "${add_dirs[@]}"; do
-    $first || dirs_json+=","
-    dirs_json+="\"$d\""
-    first=false
-  done
-  dirs_json+="]"
-  cat > "$ticket_dir/.claude/settings.json" <<SETTINGS
+  local ticket_context
+  ticket_context=$(cat <<'CONTEXT'
+# Ticket Context
+
+The additional directories provided to this session are worktrees of all repos currently added to this ticket. These are the **only** directories you should search and modify for project code.
+
+If you need code from a repo that is not among the provided directories, **do not** attempt to locate or access it yourself. Instead, ask the user to add the repo to the ticket first (via `ticket add-repo <repo>` / `ta <repo>`) and restart the session.
+CONTEXT
+)
+
+  if $use_copilot; then
+    # Build --add-dir flags for each worktree
+    local add_dir_flags=()
+    for d in "${add_dirs[@]}"; do
+      add_dir_flags+=(--add-dir "$d")
+    done
+
+    # Write .github/copilot-instructions.md with ticket context + explicit repo paths
+    mkdir -p "$ticket_dir/.github"
+    {
+      echo "$ticket_context"
+      if [ ${#add_dirs[@]} -gt 0 ]; then
+        echo ""
+        echo "## Accessible Repositories"
+        echo ""
+        echo "The following repo worktrees have been added to this session and are available for file access:"
+        echo ""
+        for d in "${add_dirs[@]}"; do
+          echo "- \`$d\`"
+        done
+      fi
+      if [ -f "$ticket_dir/JIRA.md" ]; then
+        echo ""
+        cat "$ticket_dir/JIRA.md"
+      fi
+    } > "$ticket_dir/.github/copilot-instructions.md"
+
+    (cd "$ticket_dir" && copilot "${add_dir_flags[@]}" "$@")
+  else
+    # Write project-level settings with only ticket worktrees
+    # (overrides global additionalDirectories so ~/knime/repos isn't included)
+    mkdir -p "$ticket_dir/.claude"
+    local dirs_json="["
+    local first=true
+    for d in "${add_dirs[@]}"; do
+      $first || dirs_json+=","
+      dirs_json+="\"$d\""
+      first=false
+    done
+    dirs_json+="]"
+    cat > "$ticket_dir/.claude/settings.json" <<SETTINGS
 {
   "permissions": {
     "additionalDirectories": $dirs_json
@@ -229,20 +364,105 @@ tc() {
 }
 SETTINGS
 
-  # Write project-level CLAUDE.md with ticket context instructions + Jira description
-  {
-    cat <<'CLAUDEMD'
-# Ticket Context
+    # Write project-level CLAUDE.md with ticket context instructions + Jira description
+    {
+      echo "$ticket_context"
+      if [ ${#add_dirs[@]} -gt 0 ]; then
+        echo ""
+        echo "## Accessible Repositories"
+        echo ""
+        echo "The following repo worktrees have been added to this session and are available for file access:"
+        echo ""
+        for d in "${add_dirs[@]}"; do
+          echo "- \`$d\`"
+        done
+      fi
+      if [ -f "$ticket_dir/JIRA.md" ]; then
+        echo ""
+        cat "$ticket_dir/JIRA.md"
+      fi
+    } > "$ticket_dir/CLAUDE.md"
 
-The additional directories provided to this session are worktrees of all repos currently added to this ticket. These are the **only** directories you should search and modify for project code.
+    (cd "$ticket_dir" && claude "$@")
+  fi
+}
 
-If you need code from a repo that is not among the provided directories, **do not** attempt to locate or access it yourself. Instead, ask the user to add the repo to the ticket first (via `ticket add-repo <repo>` / `ta <repo>`) and restart the session.
-CLAUDEMD
-    if [ -f "$ticket_dir/JIRA.md" ]; then
-      echo ""
-      cat "$ticket_dir/JIRA.md"
+# _ticket_open_url <url>
+#   Opens a URL in the active ticket's Chrome tab group (if available), else default browser.
+_ticket_open_url() {
+  local url="$1"
+  local script_dir="/Users/paulbaernreuther/ai/framework/commands/ticket"
+  if [ -n "${ACTIVE_TICKET:-}" ] && [ -f "$HOME/.tickets/$ACTIVE_TICKET.yaml" ]; then
+    local yaml_file="$HOME/.tickets/$ACTIVE_TICKET.yaml"
+    local color name group
+    color=$(grep -E '^color:' "$yaml_file" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"')
+    [ -z "$color" ] && color="blue"
+    name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//' | sed 's/^"//;s/"$//')
+    group="$ACTIVE_TICKET $name"
+    "$script_dir/tab-open" "$group" "$color" "$url"
+  else
+    open "$url"
+  fi
+}
+
+# gP — git push, overriding the definition in .zshrc to auto-open GitHub PR URL after push.
+#       Captures stderr (where git writes remote messages) and opens any "Create a pull request"
+#       link in the active ticket's Chrome tab group, or default browser if no ticket is active.
+gP() {
+  local branch
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || { echo "Not in a git repo" >&2; return 1; }
+
+  if [[ "$branch" == "master" || "$branch" == "main" ]]; then
+    echo "Warning: You are about to force push to $branch!"
+    echo "Press enter 3 times to confirm, or Ctrl+C to cancel."
+    read -r
+    echo "Press enter 2 more times..."
+    read -r
+    echo "Press enter 1 more time..."
+    read -r
+  fi
+
+  local upstream
+  upstream=$(git rev-parse --symbolic-full-name --abbrev-ref @{u} 2>/dev/null)
+
+  local tmpfile rc=0
+  tmpfile=$(mktemp)
+
+  if [ -z "$upstream" ]; then
+    echo "No upstream branch set for '$branch'."
+    echo -n "Do you want to set and push to origin/$branch? (y/N) "
+    local confirm
+    read confirm
+    if [[ -z "$confirm" || "$confirm" =~ ^[Yy]$ ]]; then
+      git push --set-upstream origin "$branch" 2>"$tmpfile"
+      rc=$?
+    else
+      echo "Push aborted."
+      rm -f "$tmpfile"
+      return 0
     fi
-  } > "$ticket_dir/CLAUDE.md"
+  else
+    git push --force-with-lease 2>"$tmpfile"
+    rc=$?
+  fi
 
-  (cd "$ticket_dir" && claude "$@")
+  cat "$tmpfile" >&2
+
+  if [ $rc -eq 0 ]; then
+    local url
+    url=$(grep -oE 'https://github\.com/[^ ]+/pull/new/[^ ]+' "$tmpfile" | head -1 | command tr -d '\r')
+    if [ -z "$url" ]; then
+      url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null || true)
+    fi
+    if [ -n "$url" ]; then
+      if [ -n "${ACTIVE_TICKET:-}" ] && grep -qE "^  $branch:" "$HOME/.tickets/$ACTIVE_TICKET.yaml" 2>/dev/null; then
+        _ticket_open_url "$url"
+      else
+        open "$url"
+      fi
+    fi
+  fi
+
+  rm -f "$tmpfile"
+  return $rc
 }

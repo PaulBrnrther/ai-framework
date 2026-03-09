@@ -68,7 +68,7 @@ for branch in "${BRANCHES[@]}"; do
       fi
 
       # Uncommitted changes (staged + unstaged + untracked file count)
-      dirty_count=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+      dirty_count=$(git -C "$WORKTREE_PATH" status --porcelain 2>/dev/null | wc -l | command tr -d ' ')
 
       # Build summary line
       if [ "$commits_ahead_master" = "0" ]; then

@@ -41,7 +41,7 @@ for branch in "${BRANCHES[@]}"; do
     # Check for unpushed commits
     unpushed=$(git -C "$wt" log "@{u}..HEAD" --oneline 2>/dev/null || true)
     if [ -n "$unpushed" ]; then
-      count=$(echo "$unpushed" | wc -l | tr -d ' ')
+      count=$(echo "$unpushed" | wc -l | command tr -d ' ')
       WARNINGS+=("  $repo: $count unpushed commit(s)")
     fi
   done < <("$TICKET_LIB_DIR/parse-ticket-repos" "$YAML_FILE" "$branch")

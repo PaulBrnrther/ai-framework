@@ -8,9 +8,17 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
 
-TICKET="${1:-${ACTIVE_TICKET:-}}"
+YES=false
+TICKET=""
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) YES=true ;;
+    *) TICKET="$arg" ;;
+  esac
+done
+TICKET="${TICKET:-${ACTIVE_TICKET:-}}"
 if [ -z "$TICKET" ]; then
-  echo "Usage: ticket done [TICKET]" >&2
+  echo "Usage: ticket done [-y] [TICKET]" >&2
   echo "  If no ticket specified, uses \$ACTIVE_TICKET" >&2
   exit 1
 fi
@@ -56,8 +64,12 @@ for branch in "${BRANCHES[@]}"; do
 done
 echo "    YAML: $YAML_FILE" >&2
 echo "" >&2
-echo "Press enter to confirm, ctrl-c to abort." >&2
-read -r </dev/tty
+if $YES; then
+  echo "Confirmed via -y." >&2
+else
+  echo "Press enter to confirm, ctrl-c to abort." >&2
+  read -r </dev/tty
+fi
 
 for branch in "${BRANCHES[@]}"; do
   # Get repos for this branch using helper script

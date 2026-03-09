@@ -54,13 +54,9 @@ if [ -f "$YAML_FILE" ]; then
   exit 0
 fi
 
-cat > "$YAML_FILE" <<EOF
-ticket: $TICKET
-name: "$NAME"
-branches:
-  $BRANCH:
-    repos: {}
-EOF
+create_ticket_yaml "$YAML_FILE" "$TICKET" "$NAME" "$BRANCH"
+COLOR=$(grep '^color:' "$YAML_FILE" | sed 's/^color:[[:space:]]*//')
+echo "Color:  $COLOR" >&2
 
 # Set system-wide active ticket
 set_active_ticket "$TICKET" --global

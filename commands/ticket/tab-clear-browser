@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-clear — close all Chrome tabs that are not in a tab group and not pinned.
+
+FIFO="$HOME/.tab-manager.fifo"
+TIMEOUT=3
+
+if [ ! -p "$FIFO" ]; then
+  echo "Error: Tab manager FIFO not found at $FIFO" >&2
+  exit 1
+fi
+
+RESPONSE=$(mktemp /tmp/tab-clear-XXXX)
+rm "$RESPONSE"
+
+if ! timeout "${TIMEOUT}s" bash -c "printf '{\"action\":\"list\",\"response_file\":\"%s\"}\n' \"\$1\" > \"\$2\"" _ "$RESPONSE" "$FIFO" 2>/dev/null; then
+  echo "Error: Tab manager not responding (is the extension running?)." >&2
+  exit 1
+fi
+
+ELAPSED=0
+while [ ! -f "$RESPONSE" ] && [ "$ELAPSED" -lt "$((TIMEOUT * 10))" ]; do
+  sleep 0.1
+  ELAPSED=$(( ELAPSED + 1 ))
+done
+
+if [ ! -f "$RESPONSE" ]; then
+  echo "Error: Timeout waiting for tab list response." >&2
+  exit 1
+fi
+
+TAB_IDS=$(jq -c '
+  (.groups | map(select(.title == "" or .title == null)) | map(.id)) as $unnamed |
+  [.tabs[] | select(
+    .pinned == false and
+    (.groupId == -1 or (.groupId as $gid | $unnamed | any(. == $gid)))
+  ) | .id]
+' "$RESPONSE")
+COUNT=$(echo "$TAB_IDS" | jq 'length')
+rm -f "$RESPONSE"
+
+if [ "$COUNT" -eq 0 ]; then
+  echo "No ungrouped browser tabs to close." >&2
+  exit 0
+fi
+
+echo "Closing $COUNT ungrouped browser tab(s)..." >&2
+PAYLOAD=$(printf '{"action":"close","tabIds":%s}\n' "$TAB_IDS")
+if ! timeout "${TIMEOUT}s" bash -c "printf '%s' \"\$1\" > \"\$2\"" _ "$PAYLOAD" "$FIFO" 2>/dev/null; then
+  echo "Error: Timeout sending close action to tab manager." >&2
+  exit 1
+fi
+open -a "Google Chrome"

@@ -57,7 +57,7 @@ if [ -n "$CURRENT_REPO" ]; then
 elif [ ${#REPOS[@]} -eq 1 ]; then
   REPO="${REPOS[0]}"
 else
-  REPO=$(printf '%s\n' "${REPOS[@]}" | fzf --prompt="Open PR for repo> " --height=~10 --reverse </dev/tty)
+  REPO=$(printf '%s\n' "${REPOS[@]}" | fzf --prompt="Open PR for repo> " --height=~10 --reverse)
   if [ -z "$REPO" ]; then
     echo "Aborted." >&2
     exit 1
@@ -72,8 +72,13 @@ if [ ! -d "$WORKTREE_PATH" ]; then
 fi
 
 echo "Opening PR for $REPO ($BRANCH)..." >&2
-if ! (cd "$WORKTREE_PATH" && gh pr view "$BRANCH" --web 2>/dev/null); then
+PR_URL=$(cd "$WORKTREE_PATH" && gh pr view "$BRANCH" --json url --jq .url 2>/dev/null || true)
+if [ -z "$PR_URL" ]; then
   echo "No open PR found for branch '$BRANCH' in $REPO." >&2
   echo "To create one: gh pr create --repo knime/$REPO" >&2
   exit 1
 fi
+
+GROUP=$(ticket_tab_group "$ACTIVE_TICKET" "$YAML_FILE")
+COLOR=$(ticket_tab_color "$ACTIVE_TICKET")
+"$TICKET_LIB_DIR/tab-open" "$GROUP" "$COLOR" "$PR_URL"

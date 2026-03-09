@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ticket open-jira — open the active ticket in Jira via Chrome tab group.
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ticket-lib.sh"
+
+if [ -z "${ACTIVE_TICKET:-}" ]; then
+  echo "Error: No active ticket." >&2
+  exit 1
+fi
+
+YAML_FILE=$(ticket_yaml_file "$ACTIVE_TICKET")
+if [ ! -f "$YAML_FILE" ]; then
+  echo "Error: Ticket file not found: $YAML_FILE" >&2
+  exit 1
+fi
+
+JIRA_BASE="https://knime-com.atlassian.net/browse"
+URL="$JIRA_BASE/$ACTIVE_TICKET"
+
+GROUP=$(ticket_tab_group "$ACTIVE_TICKET" "$YAML_FILE")
+COLOR=$(ticket_tab_color "$ACTIVE_TICKET")
+
+echo "Opening $ACTIVE_TICKET in Jira..." >&2
+"$TICKET_LIB_DIR/tab-open" "$GROUP" "$COLOR" "$URL"

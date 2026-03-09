@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-clear-terminal — close idle Terminal.app tabs/windows (not running a foreground process)
+
+CLOSED=$(osascript <<'EOF'
+tell application "Terminal"
+  set closed_count to 0
+  -- snapshot window list before mutating
+  set windowList to every window
+  repeat with aWindow in windowList
+    set tabList to every tab of aWindow
+    set idleTabs to {}
+    repeat with aTab in tabList
+      if not (busy of aTab) then
+        set end of idleTabs to aTab
+      end if
+    end repeat
+    if (count of idleTabs) = 0 then
+      -- nothing idle in this window
+    else if (count of idleTabs) = (count of tabList) then
+      -- all tabs idle — close the whole window
+      close aWindow
+      set closed_count to closed_count + (count of idleTabs)
+    else
+      -- mixed window — close only the idle tabs
+      repeat with aTab in idleTabs
+        close aTab
+        set closed_count to closed_count + 1
+      end repeat
+    end if
+  end repeat
+  return closed_count
+end tell
+EOF
+)
+
+if [ "${CLOSED:-0}" -gt 0 ]; then
+  echo "Closed $CLOSED idle terminal tab(s)." >&2
+else
+  echo "No idle terminal tabs to close." >&2
+fi

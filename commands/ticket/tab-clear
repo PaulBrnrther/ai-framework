@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-clear — close idle Terminal.app tabs + ungrouped browser tabs,
+#             then offer an fzf picker to switch to a remaining terminal tab.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+"$SCRIPT_DIR/tab-clear-terminal"
+"$SCRIPT_DIR/tab-clear-browser"
+
+# List remaining terminal tabs for switching (coords|title|tty)
+TABS_RAW=$(osascript <<'EOF'
+tell application "Terminal"
+  set output to ""
+  repeat with wIdx from 1 to count of windows
+    repeat with tIdx from 1 to count of tabs of window wIdx
+        set aTab to tab tIdx of window wIdx
+        set tabTitle to custom title of aTab
+        set tabTTY to tty of aTab
+        set output to output & wIdx & ":" & tIdx & "|" & tabTitle & "|" & tabTTY & ";"
+    end repeat
+  end repeat
+  return output
+end tell
+EOF
+)
+
+[ -z "$TABS_RAW" ] && exit 0
+
+# Enrich each entry with the cwd of the shell on that tty
+TABS=""
+while IFS= read -r entry; do
+  [ -z "$entry" ] && continue
+  coords=$(echo "$entry" | cut -d'|' -f1)
+  title=$(echo "$entry" | cut -d'|' -f2)
+  tty=$(echo "$entry" | cut -d'|' -f3)
+  pid=$(ps -t "$tty" -o pid= 2>/dev/null | tr -d ' ' | head -1 || true)
+  cwd=""
+  if [ -n "$pid" ]; then
+    cwd=$(lsof -a -d cwd -p "$pid" 2>/dev/null | awk 'NR>1{print $NF}' | head -1 || true)
+    cwd="${cwd/#$HOME/~}"
+  fi
+  TABS+="$coords|$title|$cwd"$'\n'
+done < <(echo "$TABS_RAW" | tr ';' '\n' | grep -v '^$' || true)
+
+[ -z "$TABS" ] && exit 0
+
+exit 0 # TODO: fzf picker not yet working
+
+SELECTION=$(echo "$TABS" | fzf --prompt="Switch to tab> " --height=~10 --reverse \
+  --delimiter='|' --with-nth=2,3)
+[ -z "$SELECTION" ] && exit 0
+
+W_IDX=$(echo "$SELECTION" | cut -d'|' -f1 | cut -d: -f1)
+T_IDX=$(echo "$SELECTION" | cut -d'|' -f1 | cut -d: -f2)
+
+osascript <<EOF
+tell application "Terminal"
+  set selected tab of window $W_IDX to tab $T_IDX of window $W_IDX
+  activate
+end tell
+EOF

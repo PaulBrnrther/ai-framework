@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-list — query open Chrome tabs and tab groups from the tab manager.
+# Prints JSON: { "tabs": [...], "groups": [...] }
+# Use --pretty for human-readable output.
+
+FIFO="$HOME/.tab-manager.fifo"
+TIMEOUT=3
+
+PRETTY=false
+if [ "${1:-}" = "--pretty" ]; then
+  PRETTY=true
+fi
+
+if [ ! -p "$FIFO" ]; then
+  echo "Error: Tab manager FIFO not found at $FIFO" >&2
+  exit 1
+fi
+
+RESPONSE=$(mktemp /tmp/tab-list-XXXX)
+rm "$RESPONSE"  # remove so we can detect when it appears
+
+printf '{"action":"list","response_file":"%s"}\n' "$RESPONSE" > "$FIFO"
+
+# Poll for response
+ELAPSED=0
+while [ ! -f "$RESPONSE" ] && [ "$ELAPSED" -lt "$((TIMEOUT * 10))" ]; do
+  sleep 0.1
+  ELAPSED=$(( ELAPSED + 1 ))
+done
+
+if [ ! -f "$RESPONSE" ]; then
+  echo "Error: Timeout waiting for tab list response." >&2
+  exit 1
+fi
+
+if $PRETTY; then
+  jq -r '
+    (.groups | map({(.id|tostring): .}) | add) as $groups |
+    .tabs | group_by(.groupId) |
+    map(
+      (.[0].groupId | tostring) as $gid |
+      ($groups[$gid].title // "— ungrouped —") as $title |
+      "[\($title)]\n" + (map("  \(.title // "(loading...)") — \(.url)") | join("\n"))
+    ) | join("\n\n")
+  ' "$RESPONSE"
+else
+  cat "$RESPONSE"
+fi
+
+rm -f "$RESPONSE"
