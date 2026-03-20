@@ -166,7 +166,6 @@ if [ $# -eq 0 ]; then
   CHOICE=$(echo "$RESULTS" | fzf \
     --prompt="Jira ticket> " --height=~20 --reverse --no-sort \
     --delimiter=$'\t' --with-nth=1,2,3 \
-    --disabled \
     --bind "change:reload($RELOAD_CMD)")
   if [ -z "$CHOICE" ]; then
     echo "Aborted." >&2
@@ -293,10 +292,16 @@ if [ -z "$RESULTS" ]; then
     echo "Saved: $ISSUE_TYPE → $PREFIX" >&2
   fi
 
+  # Max branch length enforced by GitHub repository rules (70), with margin
+  MAX_BRANCH_LEN=60
+  BRANCH_PREFIX="${PREFIX}/${TICKET}-"
+  MAX_SLUG_LEN=$(( MAX_BRANCH_LEN - ${#BRANCH_PREFIX} ))
+
   # Instant slug from bash, AI improvement on tab
-  SLUG=$(echo "$SUMMARY" | command tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-60)
+  SLUG=$(echo "$SUMMARY" | command tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-${MAX_SLUG_LEN})
+  SLUG=${SLUG%-}
   SLUG_SOURCE="fallback"
-  BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+  BRANCH="${BRANCH_PREFIX}${SLUG}"
 
   # Ask for confirmation — tab to improve with AI
   while true; do
@@ -337,10 +342,11 @@ if [ -z "$RESULTS" ]; then
         wait $PID_COPILOT 2>/dev/null || true
         rm -rf "$SLUG_DIR"
 
-        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//' | cut -c1-${MAX_SLUG_LEN})
+        NEW_SLUG=${NEW_SLUG%-}
         if [ -n "$NEW_SLUG" ]; then
           SLUG="$NEW_SLUG"
-          BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+          BRANCH="${BRANCH_PREFIX}${SLUG}"
           SLUG_SOURCE="$WINNER"
         else
           echo "  AI generation failed, keeping current slug." >&2
@@ -352,10 +358,11 @@ if [ -z "$RESULTS" ]; then
         read -r REFINEMENT </dev/tty
         echo "Refining..." >&2
         RAW_SLUG=$(claude -p --model haiku --effort low "Current branch slug: ${SLUG}. Original title: ${SUMMARY}. User wants: ${REFINEMENT}. Output ONLY the improved kebab-case slug (about 5 lowercase words, hyphens, nothing else)." 2>/dev/null || true)
-        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//')
+        NEW_SLUG=$(echo "$RAW_SLUG" | command tr -d '\n\r' | xargs | tr -cd 'a-z0-9-' | sed 's/^-*//;s/-*$//' | cut -c1-${MAX_SLUG_LEN})
+        NEW_SLUG=${NEW_SLUG%-}
         if [ -n "$NEW_SLUG" ]; then
           SLUG="$NEW_SLUG"
-          BRANCH="${PREFIX}/${TICKET}-${SLUG}"
+          BRANCH="${BRANCH_PREFIX}${SLUG}"
           SLUG_SOURCE="claude"
         else
           echo "  Refinement failed, keeping current slug." >&2

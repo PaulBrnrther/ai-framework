@@ -204,6 +204,29 @@ TST() {
   ACTIVE_TICKET="$orig_ticket"
 }
 alias cl='/Users/paulbaernreuther/ai/framework/commands/ticket/tab-clear'
+CL() {
+  cl "$@"
+
+  # Auto-teardown tickets whose Jira status is Done or Closed
+  if [ -z "${KNIME_ATLASSIAN_EMAIL:-}" ] || [ -z "${KNIME_ATLASSIAN_API_TOKEN:-}" ]; then
+    return 0
+  fi
+
+  local yaml ticket jira_status
+  for yaml in "$HOME"/.tickets/*.yaml; do
+    [ -f "$yaml" ] || continue
+    ticket=$(basename "$yaml" .yaml)
+    jira_status=$(curl -s \
+      -u "${KNIME_ATLASSIAN_EMAIL}:${KNIME_ATLASSIAN_API_TOKEN}" \
+      -H "Accept: application/json" \
+      "https://knime-com.atlassian.net/rest/api/3/issue/${ticket}?fields=status" \
+      | jq -r '.fields.status.name // ""')
+    if [[ "$jira_status" == "Done" || "$jira_status" == "Closed" ]]; then
+      echo "Ticket $ticket is $status — tearing down..." >&2
+      _ticket_impl done -y "$ticket"
+    fi
+  done
+}
 alias tsnap='ticket snapshot-regen'
 alias tpU='ticket pull'
 alias tpr='ticket pr'
@@ -247,7 +270,6 @@ _jira_browser() {
   choice=$(echo "$results" | fzf \
     --prompt="$prompt" --height=~20 --reverse --no-sort \
     --delimiter=$'\t' --with-nth=1,2,3 \
-    --disabled \
     --bind "change:reload($reload_cmd)")
 
   rm -f "$excl_file"
@@ -383,22 +405,72 @@ SETTINGS
       fi
     } > "$ticket_dir/CLAUDE.md"
 
-    (cd "$ticket_dir" && claude "$@")
+    (cd "$ticket_dir" && claude --dangerously-skip-permissions "$@")
   fi
 }
 
-# _ticket_open_url <url>
-#   Opens a URL in the active ticket's Chrome tab group (if available), else default browser.
+# _ticket_from_worktree
+#   Resolves ticket from the current git worktree path by matching repo+branch in ~/.tickets/*.yaml.
+_ticket_from_worktree() {
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+
+  local repos_prefix="$HOME/knime/repos/"
+  local rel="${repo_root#$repos_prefix}"
+  [ "$rel" = "$repo_root" ] && return 1
+
+  local repo="${rel%%.git/branches/*}"
+  [ "$repo" = "$rel" ] && return 1
+
+  local branch="${rel#*.git/branches/}"
+  [ -z "$repo" ] && return 1
+  [ -z "$branch" ] && return 1
+  [ "$branch" = "$rel" ] && return 1
+
+  local yaml ticket
+  for yaml in "$HOME"/.tickets/*.yaml; do
+    [ -f "$yaml" ] || continue
+    if awk -v target_branch="$branch" -v target_repo="$repo" '
+      /^branches:[[:space:]]*$/ { in_branches=1; next }
+      in_branches && /^  [^[:space:]][^:]*:[[:space:]]*$/ {
+        current=$0
+        sub(/^  /, "", current)
+        sub(/:[[:space:]]*$/, "", current)
+        next
+      }
+      in_branches && current==target_branch && /^      [^[:space:]][^:]*:[[:space:]]*$/ {
+        repo=$0
+        sub(/^      /, "", repo)
+        sub(/:[[:space:]]*$/, "", repo)
+        if (repo==target_repo) {
+          found=1
+          exit 0
+        }
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$yaml"; then
+      ticket=$(basename "$yaml" .yaml)
+      echo "$ticket"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+# _ticket_open_url <url> [ticket]
+#   Opens a URL in the provided ticket's Chrome tab group, else active ticket's group, else default browser.
 _ticket_open_url() {
   local url="$1"
+  local ticket="${2:-${ACTIVE_TICKET:-}}"
   local script_dir="/Users/paulbaernreuther/ai/framework/commands/ticket"
-  if [ -n "${ACTIVE_TICKET:-}" ] && [ -f "$HOME/.tickets/$ACTIVE_TICKET.yaml" ]; then
-    local yaml_file="$HOME/.tickets/$ACTIVE_TICKET.yaml"
+  if [ -n "$ticket" ] && [ -f "$HOME/.tickets/$ticket.yaml" ]; then
+    local yaml_file="$HOME/.tickets/$ticket.yaml"
     local color name group
     color=$(grep -E '^color:' "$yaml_file" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"')
     [ -z "$color" ] && color="blue"
     name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//' | sed 's/^"//;s/"$//')
-    group="$ACTIVE_TICKET $name"
+    group="$ticket $name"
     "$script_dir/tab-open" "$group" "$color" "$url"
   else
     open "$url"
@@ -407,7 +479,7 @@ _ticket_open_url() {
 
 # gP — git push, overriding the definition in .zshrc to auto-open GitHub PR URL after push.
 #       Captures stderr (where git writes remote messages) and opens any "Create a pull request"
-#       link in the active ticket's Chrome tab group, or default browser if no ticket is active.
+#       link in the tab group of the ticket that owns the current worktree path.
 gP() {
   local branch
   branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || { echo "Not in a git repo" >&2; return 1; }
@@ -455,8 +527,10 @@ gP() {
       url=$(gh pr view "$branch" --json url --jq .url 2>/dev/null || true)
     fi
     if [ -n "$url" ]; then
-      if [ -n "${ACTIVE_TICKET:-}" ] && grep -qE "^  $branch:" "$HOME/.tickets/$ACTIVE_TICKET.yaml" 2>/dev/null; then
-        _ticket_open_url "$url"
+      local worktree_ticket
+      worktree_ticket=$(_ticket_from_worktree || true)
+      if [ -n "$worktree_ticket" ]; then
+        _ticket_open_url "$url" "$worktree_ticket"
       else
         open "$url"
       fi
