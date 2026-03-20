@@ -62,7 +62,7 @@ else
     ticket="${TICKETS[$i]}"
     color=$(grep -E '^color:' "$TICKETS_DIR/$ticket.yaml" 2>/dev/null | head -1 | sed 's/^color:[[:space:]]*//;s/"//g')
     ansi=$(ticket_ansi_color "$color")
-    display="${marker}${ansi}${ticket}${RESET}  ${NAMES[$i]}"
+    display="${marker}${ansi}"$'\033[1m'"${ticket}"$'\033[22m'"${RESET}  ${NAMES[$i]}"
     OPTIONS+=("${ticket}	${display}")
   done
 

@@ -47,7 +47,17 @@ if [ "$BACKLOG_ONLY" = "1" ]; then
   JQL="$JQL AND status = \"In Backlog\""
 fi
 if [ -n "$SEARCH_TEXT" ]; then
-  JQL="$JQL AND text ~ \"${SEARCH_TEXT}\""
+  KEY_CLAUSE=""
+  if [[ "$SEARCH_TEXT" =~ ^[A-Z]+-[0-9]+$ ]]; then
+    # Full key like UIEXT-3362
+    KEY_CLAUSE="OR key = \"${SEARCH_TEXT}\""
+  elif [[ "$SEARCH_TEXT" =~ ^[0-9]+$ ]]; then
+    # Plain number like 1234 — try as PROJECT-NUMBER
+    PROJECT="${ALL_PROJECT:-UIEXT}"
+    KEY_CLAUSE="OR key = \"${PROJECT}-${SEARCH_TEXT}\""
+  fi
+  # Append wildcard for partial word matching (e.g. "We" matches "WebUI")
+  JQL="$JQL AND (text ~ \"${SEARCH_TEXT}*\" ${KEY_CLAUSE})"
 fi
 JQL="$JQL ORDER BY updated DESC"
 ENCODED_JQL=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$JQL")

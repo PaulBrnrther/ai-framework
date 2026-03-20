@@ -71,6 +71,10 @@ Scripts live in `commands/ticket/` and are sourced from `~/.zshrc`.
 | `ticket workingset` | `tws` | Create/update Eclipse working set (symlinks are auto-managed on ticket switch) |
 | `ticket pull` | `tpU` | Fetch + hard reset all repos to upstream (confirms if uncommitted changes/unpushed commits) |
 | `ticket pr` | `tpr` | Open the GitHub PR for the active ticket's branch in the browser (auto-detects repo from cwd, fzf picker if multiple) |
+| `ticket jira` | `tj` / `Tj` | fzf picker from Jira tickets **assigned to me** (non-closed); `Tj` sets active ticket globally |
+| `ticket jira` (all) | `tJ` / `TJ` | fzf picker from **all non-closed UIEXT tickets**; `TJ` sets active ticket globally |
+| `ticket jira` (refresh) | `tjf` | Re-sync the **current active ticket** from Jira/GitHub — skips fzf picker and re-sync confirmation, goes straight to GitHub branch search |
+| `ticket jira` (update Jira files only) | `tju` | Refresh Jira-derived local files (e.g., `JIRA.md`, parent/sibling ticket docs) from Jira for the active ticket (or a provided ticket key) |
 | `ticket done` | `td` | Tear down a ticket: remove worktrees, symlinks, YAML, and update active ticket |
 
 ### Architecture
@@ -78,7 +82,7 @@ Scripts live in `commands/ticket/` and are sourced from `~/.zshrc`.
 - **Ticket YAML** (`~/.tickets/<TICKET>.yaml`): Per-ticket state — name, branches, repos, plugins (see schema below)
 - **Active ticket** (`~/.active-ticket`): System-wide focused ticket, read on shell startup → `$ACTIVE_TICKET`
 - **Recent order** (`~/.tickets/.recent`): MRU-ordered ticket list for the fzf picker
-- **Bare repos** (`~/knime/repos/<name>.git`): Git bare clones, worktrees live inside at `worktrees/<branch>/`
+- **Bare repos** (`~/knime/repos/<name>.git`): Git bare clones, worktrees live inside at `branches/<branch>/`
 - **Repo config** (`~/knime/repos/repos.yaml`): Manually maintained registry of repos, plugins, and frontend packages (not yet populated)
 
 ### Git Worktree Setup
@@ -87,7 +91,7 @@ Repos are cloned as bare repos (`<name>.git`) with worktrees created inside them
 ```
 ~/knime/repos/
   knime-core-ui.git/           ← bare repo
-    worktrees/
+    branches/
       enh/UIEXT-1234-.../      ← worktree per ticket branch
       enh/UIEXT-999-.../
   knime-core-ui/               ← existing clone (to be replaced by symlink later)
@@ -100,6 +104,7 @@ Bare repos have their fetch refspec fixed to `+refs/heads/*:refs/remotes/origin/
 ```yaml
 ticket: UIEXT-1234
 name: Human Readable Name
+color: blue
 branches:
   enh/UIEXT-1234-branch-name:
     repos:
@@ -140,8 +145,8 @@ The `jars_fetched` field is set automatically by `ticket fetch-jars` for plugins
 ```
 ~/knime/repos/
   knime-core-ui.git/           ← bare repo
-    worktrees/enh/UIEXT-1234-.../
-  knime-core-ui -> knime-core-ui.git/worktrees/enh/UIEXT-1234-.../  ← symlink (auto-created)
+    branches/enh/UIEXT-1234-.../
+  knime-core-ui -> knime-core-ui.git/branches/enh/UIEXT-1234-.../  ← symlink (auto-created)
   remember-local/              ← backup of original clones (auto-created)
     knime-core-ui/
 ```

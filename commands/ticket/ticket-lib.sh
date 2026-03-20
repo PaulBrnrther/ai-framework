@@ -53,20 +53,37 @@ require_eval_file() {
   fi
 }
 
+# Color mode: dark (default) or light — change by editing ~/.tickets/color-mode
+# dark  → Chromium kGoogle*300 series (for dark terminal backgrounds)
+# light → Chromium kGoogle*600/700 series (for light terminal backgrounds)
+_TICKET_COLOR_MODE="$(cat "$TICKETS_DIR/color-mode" 2>/dev/null || echo dark)"
+
 # ticket_ansi_color <chrome-color-name>
 #   Returns an ANSI escape code for the given Chrome tab group color name.
 #   Outputs the reset code for unknown/missing colors.
 ticket_ansi_color() {
-  case "${1:-}" in
-    blue)   printf '\033[94m' ;;
-    red)    printf '\033[91m' ;;
-    yellow) printf '\033[93m' ;;
-    green)  printf '\033[92m' ;;
-    pink)   printf '\033[95m' ;;
-    purple) printf '\033[95m' ;;
-    cyan)   printf '\033[96m' ;;
-    orange) printf '\033[33m' ;;
-    *)      printf '\033[0m'  ;;
+  case "${_TICKET_COLOR_MODE}:${1:-}" in
+    # Dark mode — kGoogle*300
+    dark:grey)   printf '\033[38;5;188m' ;;  # #DADCE0 kGoogleGrey300
+    dark:blue)   printf '\033[38;5;111m' ;;  # #8AB4F8 kGoogleBlue300
+    dark:red)    printf '\033[38;5;210m' ;;  # #F28B82 kGoogleRed300
+    dark:yellow) printf '\033[38;5;221m' ;;  # #FDD663 kGoogleYellow300
+    dark:green)  printf '\033[38;5;114m' ;;  # #81C995 kGoogleGreen300
+    dark:pink)   printf '\033[38;5;212m' ;;  # #FF8BCB kGooglePink300
+    dark:purple) printf '\033[38;5;177m' ;;  # #C58AF9 kGooglePurple300
+    dark:cyan)   printf '\033[38;5;117m' ;;  # #78D9EC kGoogleCyan300
+    dark:orange) printf '\033[38;5;215m' ;;  # #FCAD70 kGoogleOrange300
+    # Light mode — kGoogle*600/700
+    light:grey)   printf '\033[38;5;243m' ;;  # #5F6368 kGoogleGrey700
+    light:blue)   printf '\033[38;5;33m'  ;;  # #1A73E8 kGoogleBlue600
+    light:red)    printf '\033[38;5;160m' ;;  # #D93025 kGoogleRed600
+    light:yellow) printf '\033[38;5;214m' ;;  # #F9AB00 kGoogleYellow600
+    light:green)  printf '\033[38;5;29m'  ;;  # #188038 kGoogleGreen700
+    light:pink)   printf '\033[38;5;162m' ;;  # #D01884 kGooglePink700
+    light:purple) printf '\033[38;5;135m' ;;  # #A142F4 kGooglePurple500
+    light:cyan)   printf '\033[38;5;30m'  ;;  # #007B83 kGoogleCyan900
+    light:orange) printf '\033[38;5;208m' ;;  # #FA903E kGoogleOrange400
+    *)            printf '\033[0m' ;;
   esac
 }
 

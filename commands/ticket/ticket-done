@@ -163,4 +163,7 @@ if new_content != content:
 " "$TICKET" "$WORKINGSETS_XML"
 fi
 
+# Close Chrome tab group for this ticket (silently skips if not open or tab manager not running)
+"$TICKET_LIB_DIR/tab-close-group" "$TICKET $NAME" || true
+
 echo "Ticket $TICKET done." >&2

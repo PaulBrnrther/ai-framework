@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# tab-close-group <group-name> — close all Chrome tabs in the named tab group.
+# Exits 0 (silently) if the group doesn't exist or the tab manager is not running.
+
+GROUP_NAME="${1:-}"
+if [ -z "$GROUP_NAME" ]; then
+  echo "Usage: tab-close-group <group-name>" >&2
+  exit 1
+fi
+
+FIFO="$HOME/.tab-manager.fifo"
+TIMEOUT=3
+
+if [ ! -p "$FIFO" ]; then
+  exit 0  # Tab manager not running — silently skip
+fi
+
+RESPONSE=$(mktemp /tmp/tab-close-group-XXXX)
+rm "$RESPONSE"
+
+if ! timeout "${TIMEOUT}s" bash -c "printf '{\"action\":\"list\",\"response_file\":\"%s\"}\n' \"\$1\" > \"\$2\"" _ "$RESPONSE" "$FIFO" 2>/dev/null; then
+  exit 0  # Not responding — silently skip
+fi
+
+ELAPSED=0
+while [ ! -f "$RESPONSE" ] && [ "$ELAPSED" -lt "$((TIMEOUT * 10))" ]; do
+  sleep 0.1
+  ELAPSED=$(( ELAPSED + 1 ))
+done
+
+if [ ! -f "$RESPONSE" ]; then
+  exit 0  # Timeout — silently skip
+fi
+
+TAB_IDS=$(jq -c --arg group "$GROUP_NAME" '
+  (.groups | map(select(.title == $group)) | map(.id)) as $gids |
+  [.tabs[] | select(.groupId as $gid | $gids | any(. == $gid)) | .id]
+' "$RESPONSE")
+COUNT=$(echo "$TAB_IDS" | jq 'length')
+rm -f "$RESPONSE"
+
+if [ "$COUNT" -eq 0 ]; then
+  exit 0
+fi
+
+echo "Closing $COUNT tab(s) in Chrome group \"$GROUP_NAME\"..." >&2
+PAYLOAD=$(printf '{"action":"close","tabIds":%s}\n' "$TAB_IDS")
+timeout "${TIMEOUT}s" bash -c "printf '%s' \"\$1\" > \"\$2\"" _ "$PAYLOAD" "$FIFO" 2>/dev/null || true
