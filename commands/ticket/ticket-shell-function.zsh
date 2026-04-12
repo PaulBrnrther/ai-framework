@@ -405,7 +405,14 @@ SETTINGS
       fi
     } > "$ticket_dir/CLAUDE.md"
 
-    (cd "$ticket_dir" && claude --dangerously-skip-permissions "$@")
+    # Resolve ticket color and pass /color as initial prompt
+    local ticket_color
+    ticket_color=$(grep -E '^color:' "$yaml" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"' || true)
+    if [ -n "$ticket_color" ]; then
+      (cd "$ticket_dir" && claude --dangerously-skip-permissions "/color $ticket_color" "$@")
+    else
+      (cd "$ticket_dir" && claude --dangerously-skip-permissions "$@")
+    fi
   fi
 }
 

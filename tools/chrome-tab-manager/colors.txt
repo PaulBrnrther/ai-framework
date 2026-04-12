@@ -1,0 +1,14 @@
+Chrome Tab Group Colors
+=======================
+
+Color     Light Mode              Dark Mode
+-------   ---------------------   --------------------
+grey      #5F6368 (Grey700)       #DADCE0 (Grey300)
+blue      #1A73E8 (Blue600)       #8AB4F8 (Blue300)
+red       #D93025 (Red600)        #F28B82 (Red300)
+yellow    #F9AB00 (Yellow600)     #FDD663 (Yellow300)
+green     #188038 (Green700)      #81C995 (Green300)
+pink      #D01884 (Pink700)       #FF8BCB (Pink300)
+purple    #A142F4 (Purple500)     #C58AF9 (Purple300)
+cyan      #007B83 (Cyan900)       #78D9EC (Cyan300)
+orange    #FA903E (Orange400)     #FCAD70 (Orange300)
