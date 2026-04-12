@@ -13,11 +13,7 @@ fi
 file_name="$1"
 body="$2"
 
-# Get the directory where this script is located
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Navigate to the repo root (parent of commands/)
-repo_root="$(cd "$script_dir/.." && pwd)"
-ideas_dir="$repo_root/ideas"
+ideas_dir="$HOME/ideas"
 
 # Capture metadata
 timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
