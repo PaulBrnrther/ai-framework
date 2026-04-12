@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+
+# claude-relaunch: Trigger a relaunch from inside claude-wrapper
+# Usage: claude-relaunch <command> [args...]
+# Examples:
+#   claude-relaunch claude --continue --model sonnet
+#   claude-relaunch echo "Hello World"
+#
+# Must be running inside claude-wrapper for the relaunch to work.
+
+set -euo pipefail
+
+SIGNAL_FILE="${CLAUDE_WRAPPER_SIGNAL_FILE:-}"
+
+if [ -z "$SIGNAL_FILE" ]; then
+    echo "[claude-relaunch] Error: not running inside claude-wrapper (CLAUDE_WRAPPER_SIGNAL_FILE not set)"
+    exit 1
+fi
+
+cmd="$*"
+
+echo "$cmd" > "$SIGNAL_FILE"
+echo "[claude-relaunch] Signal written. Killing current claude session..."
+
+# $PPID is the claude process (parent of this bash invocation)
+kill "$PPID"

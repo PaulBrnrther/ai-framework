@@ -1,0 +1,42 @@
+#!/usr/bin/env zsh
+
+# claude-wrapper: Drop-in replacement for `claude` with self-relaunch support
+# Usage: claude-wrapper [claude-args...]
+#
+# Runs `claude <args>` in a loop. After claude exits, checks for a signal
+# file to decide what to do next:
+#   - Signal file contains a command → run it, then loop
+#   - No signal file → exit
+#
+# From inside a session, trigger a relaunch via claude-relaunch:
+#   claude-relaunch --continue --model sonnet
+#
+# Or manually:
+#   echo 'claude --continue --model sonnet' > "$CLAUDE_WRAPPER_SIGNAL_FILE" && kill $PPID
+
+set -euo pipefail
+
+source /Users/paulbaernreuther/ai/framework/commands/ticket/ticket-shell-function.zsh
+
+SIGNAL_FILE="/tmp/claude_relaunch_$$"
+export CLAUDE_WRAPPER_SIGNAL_FILE="$SIGNAL_FILE"
+
+# Clean up any stale signal file
+rm -f "$SIGNAL_FILE"
+
+# First run: launch claude with all provided arguments
+# || true: process may exit non-zero when killed for relaunch
+claude "$@" || true
+
+# After exit, check for relaunch signal
+while [ -f "$SIGNAL_FILE" ]; do
+    cmd=$(cat "$SIGNAL_FILE")
+    rm -f "$SIGNAL_FILE"
+
+    echo ""
+    echo "[claude-wrapper] Relaunching: $cmd"
+    echo ""
+
+    # eval preserves quoted arguments from the signal file
+    eval "$cmd" || true
+done

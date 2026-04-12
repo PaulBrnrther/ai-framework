@@ -299,7 +299,7 @@ tc() {
   done
   set -- "${filtered_args[@]}"
 
-  local launcher="claude"
+  local launcher="/Users/paulbaernreuther/ai/framework/commands/claude-wrapper"
   $use_copilot && launcher="copilot"
 
   if [ -z "${ACTIVE_TICKET:-}" ]; then
@@ -334,7 +334,13 @@ tc() {
 
 The additional directories provided to this session are worktrees of all repos currently added to this ticket. These are the **only** directories you should search and modify for project code.
 
-If you need code from a repo that is not among the provided directories, **do not** attempt to locate or access it yourself. Instead, ask the user to add the repo to the ticket first (via `ticket add-repo <repo>` / `ta <repo>`) and restart the session.
+If you need code from a repo that is not among the provided directories, **do not** attempt to locate or access it yourself. Instead, add the repo to the ticket and relaunch (the relaunch is required to have access to the new repo within this session):
+
+```bash
+source /Users/paulbaernreuther/ai/framework/commands/ticket/ticket-shell-function.zsh
+ticket add-repo knime-some-repo
+echo 'tc --continue "Session is updated. Continue"' > "$CLAUDE_WRAPPER_SIGNAL_FILE" && kill $PPID
+```
 CONTEXT
 )
 
@@ -406,12 +412,21 @@ SETTINGS
     } > "$ticket_dir/CLAUDE.md"
 
     # Resolve ticket color and pass /color as initial prompt
-    local ticket_color
-    ticket_color=$(grep -E '^color:' "$yaml" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"' || true)
+    # Skip color injection on --continue/--resume (color is already set in the session)
+    local ticket_color=""
+    local is_continue=false
+    for arg in "$@"; do
+      case "$arg" in
+        --continue|-c|--resume|-r) is_continue=true; break ;;
+      esac
+    done
+    if ! $is_continue; then
+      ticket_color=$(grep -E '^color:' "$yaml" | head -1 | sed 's/^color:[[:space:]]*//' | command tr -d '"' || true)
+    fi
     if [ -n "$ticket_color" ]; then
-      (cd "$ticket_dir" && claude --dangerously-skip-permissions "/color $ticket_color" "$@")
+      (cd "$ticket_dir" && "$launcher" --dangerously-skip-permissions "/color $ticket_color" "$@")
     else
-      (cd "$ticket_dir" && claude --dangerously-skip-permissions "$@")
+      (cd "$ticket_dir" && "$launcher" --dangerously-skip-permissions "$@")
     fi
   fi
 }
